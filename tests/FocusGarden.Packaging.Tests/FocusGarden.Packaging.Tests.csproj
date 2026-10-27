@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/FocusGarden.App/FocusGarden.App.csproj" />
+    <!-- Independent source bytes verify what the real application actually exports. -->
+    <EmbeddedResource Include="../../browser-extension/background.js;../../browser-extension/controller.js;../../browser-extension/manifest.json;../../browser-extension/popup.css;../../browser-extension/popup.html;../../browser-extension/popup.js;../../browser-extension/rules.js;../../browser-extension/README.md"
+                      LogicalName="FocusGarden.Packaging.Expected.%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

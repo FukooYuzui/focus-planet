@@ -42,7 +42,16 @@ public partial class App : Application
             {
                 var content = (FrameworkElement)MainWindow.Content;
                 content.Measure(new Size(1280, 940)); content.Arrange(new Rect(0, 0, 1280, 940)); content.UpdateLayout();
-                File.WriteAllText(Path.Combine(DataDirectory, "installation-check.json"), System.Text.Json.JsonSerializer.Serialize(new { Product = "专注星球", Version = CurrentVersion, Ready = true, MainWindow.Title, Framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription }));
+                var browserExtensionDirectory = PackagedAssets.EnsureBrowserExtension(DataDirectory);
+                File.WriteAllText(Path.Combine(DataDirectory, "installation-check.json"), System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    Product = "专注星球", Version = CurrentVersion, Ready = true, MainWindow.Title,
+                    Framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
+                    WindowIconPresent = MainWindow.Icon is not null,
+                    WindowIconWidth = MainWindow.Icon?.Width,
+                    WindowIconHeight = MainWindow.Icon?.Height,
+                    BrowserExtensionDirectory = browserExtensionDirectory
+                }));
                 MainWindow.Close(); Shutdown(); return;
             }
             MainWindow.Show();

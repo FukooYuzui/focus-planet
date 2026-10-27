@@ -289,9 +289,16 @@ public partial class MainWindow : Window
     private void CopyToken(object sender, RoutedEventArgs e) { Clipboard.SetText(bridge.Token); Status("配对码已复制，请粘贴到浏览器扩展中。配对码只供本机使用。"); }
     private void OpenExtensionFolder(object sender, RoutedEventArgs e)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "browser-extension");
-        if (Directory.Exists(path)) Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-        else Status("请打开交付包中的 browser-extension 文件夹；源码运行时位于项目根目录。");
+        try
+        {
+            var path = PackagedAssets.EnsureBrowserExtension(App.DataDirectory);
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+            Status("扩展文件夹已打开。请在浏览器扩展管理中加载此文件夹；更新后点击扩展的重新加载。");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            Status("无法准备或打开浏览器扩展文件夹：" + ex.Message);
+        }
     }
     private void PreviousYear(object sender, RoutedEventArgs e) { if (year > 2000) year--; RefreshStatistics(); }
     private void NextYear(object sender, RoutedEventArgs e) { if (year < DateTime.Now.Year) year++; RefreshStatistics(); }
