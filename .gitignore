@@ -24,6 +24,9 @@ work/
 *.sqlite-wal
 *.sqlite-shm
 browser-pairing.key*
+backups/
+*.db.partial
+focus-data-version.json*
 .env
 .env.*
 tests/**/preview-*.png

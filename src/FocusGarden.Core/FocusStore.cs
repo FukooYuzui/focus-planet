@@ -26,13 +26,21 @@ public sealed class FocusStore : IDisposable
             Mode = SqliteOpenMode.ReadWriteCreate,
             Pooling = false
         }.ToString());
+        try
+        {
         _connection.Open();
+        int schemaVersion=FocusDataProtection.CheckSchema(_connection);
         using var command = _connection.CreateCommand();
         command.CommandText = """
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=FULL;
             PRAGMA foreign_keys=ON;
             PRAGMA busy_timeout=5000;
+            """;
+        command.ExecuteNonQuery();
+        using var schemaTransaction = _connection.BeginTransaction();
+        command.Transaction = schemaTransaction;
+        command.CommandText = """
             CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,9 +59,12 @@ public sealed class FocusStore : IDisposable
                 seconds INTEGER NOT NULL CHECK(seconds>0),
                 PRIMARY KEY(session_id,day)
             );
-            PRAGMA user_version=1;
             """;
         command.ExecuteNonQuery();
+        if(schemaVersion==0){command.CommandText="PRAGMA user_version=1";command.ExecuteNonQuery();}
+        schemaTransaction.Commit();
+        }
+        catch { _connection.Dispose(); throw; }
     }
 
     public FocusSettings LoadSettings()

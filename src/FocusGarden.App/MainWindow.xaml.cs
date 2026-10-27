@@ -32,6 +32,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Title=$"专注星球 {App.CurrentVersion} · Focus Planet";
         var workArea = SystemParameters.WorkArea;
         MinWidth = Math.Min(MinWidth, workArea.Width); MinHeight = Math.Min(MinHeight, workArea.Height);
         Width = Math.Min(Width, workArea.Width); Height = Math.Min(Height, workArea.Height);
@@ -204,7 +205,7 @@ public partial class MainWindow : Window
         if (clock == null) return;
         TimerText.Text = FormatTime(clock.RemainingSeconds); TimerProgress.Value = (double)clock.ElapsedSeconds / plannedSeconds;
         immersion?.UpdateTime(TimerText.Text);
-        Title = $"{TimerText.Text} · 专注星球 0.5" + (App.TestMode ? " [独立验收模式]" : "");
+        Title = $"{TimerText.Text} · 专注星球 {App.CurrentVersion}" + (App.TestMode ? " [独立验收模式]" : "");
     }
     private static string FormatTime(int seconds) => $"{seconds / 60:00}:{seconds % 60:00}";
     private void EnterFullscreenClick(object sender, RoutedEventArgs e) => EnterFullscreen();
@@ -239,7 +240,7 @@ public partial class MainWindow : Window
             try { store.EndSession(id.Value, status, DateTimeOffset.Now); }
             catch (Exception ex) { message += " 记录结束状态保存失败，下次启动将恢复为中断：" + ex.Message; }
         }
-        Title = "专注星球 0.5 · Focus Planet" + (App.TestMode ? " [独立验收模式]" : "");
+        Title = $"专注星球 {App.CurrentVersion} · Focus Planet" + (App.TestMode ? " [独立验收模式]" : "");
         SessionLabel.Text = status == "completed" ? "完成一段，让专注慢慢生长。" : "下一次，继续从这里开始。";
         Status(message); RefreshStatistics(); Activate();
     }
