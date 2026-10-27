@@ -16,6 +16,7 @@ public partial class MainWindow : Window
 {
     private readonly FocusStore store;
     private readonly LocalBridge bridge;
+    private readonly FocusAppearance appearance;
     private FocusSettings settings;
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private FocusClock? clock;
@@ -26,14 +27,22 @@ public partial class MainWindow : Window
     private ImmersionWindow? immersion;
     private HwndSource? hwndSource;
     private string currentTask = "";
+    private DateTime displayedDate = DateTime.Today;
+    private int nextHeatmapRefresh = 30;
     public MainWindow()
     {
         InitializeComponent();
+        var workArea = SystemParameters.WorkArea;
+        MinWidth = Math.Min(MinWidth, workArea.Width); MinHeight = Math.Min(MinHeight, workArea.Height);
+        Width = Math.Min(Width, workArea.Width); Height = Math.Min(Height, workArea.Height);
         store = new FocusStore(Path.Combine(App.DataDirectory, "focus.db"));
         store.RecoverInterrupted(DateTimeOffset.Now);
         settings = store.LoadSettings();
         bridge = new LocalBridge(App.DataDirectory);
+        appearance = new FocusAppearance(App.DataDirectory);
         LoadSettingsUi();
+        ApplyAppearance(); UpdateWallClock();
+        if (appearance.LoadWarning != null) Status(appearance.LoadWarning);
         if (App.TestMode) { TestButton.Visibility = Visibility.Visible; Title += " [独立验收模式]"; }
         timer.Tick += Tick; timer.Start();
         SourceInitialized += (_, _) =>
@@ -68,10 +77,40 @@ public partial class MainWindow : Window
         PageTitle.Text = page switch { "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
         PageSubtitle.Text = page switch { "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；紧急退出始终可用。", _ => "选一件小事，开始一段完整的专注。" };
     }
-    private void ShowFocus(object sender, RoutedEventArgs e) => Page("focus");
+    private void ShowFocus(object sender, RoutedEventArgs e) { RefreshStatistics(); Page("focus"); }
     private void ShowStats(object sender, RoutedEventArgs e) { RefreshStatistics(); Page("stats"); }
     private void ShowRules(object sender, RoutedEventArgs e) { Page("rules"); RefreshAppList(); }
     private void Status(string text) => StatusText.Text = text;
+    private void UpdateWallClock()
+    {
+        var now = DateTime.Now;
+        CurrentTimeText.Text = "现在  " + now.ToString("HH:mm:ss");
+        CurrentDateText.Text = now.ToString("yyyy 年 M 月 d 日  dddd", CultureInfo.GetCultureInfo("zh-CN"));
+        if (now.Date != displayedDate) { displayedDate = now.Date; RefreshStatistics(); }
+    }
+    private void ApplyAppearance()
+    {
+        FocusHero.Background = appearance.BackgroundImage is { } image
+            ? new ImageBrush(image) { Stretch = Stretch.UniformToFill, AlignmentX = AlignmentX.Center, AlignmentY = AlignmentY.Center }
+            : (Brush)FindResource("Card");
+        BackgroundHint.Text = appearance.ImageName is { } name ? "背景：" + name : "背景：纯色 · 主页与全屏同步";
+        BackgroundHint.ToolTip = BackgroundHint.Text;
+        ResetBackgroundButton.IsEnabled = appearance.BackgroundImage != null && clock == null;
+    }
+    private void ChooseBackground(object sender, RoutedEventArgs e)
+    {
+        if (clock != null) { Status("请在本轮结束后更换背景图片。"); return; }
+        var dialog = new OpenFileDialog { Title = "选择专注背景图片", Filter = "图片文件|*.jpg;*.jpeg;*.png;*.bmp|所有文件|*.*", CheckFileExists = true };
+        if (dialog.ShowDialog(this) != true) return;
+        try { appearance.SelectImage(dialog.FileName); ApplyAppearance(); Status("背景已保存，主页与全屏专注都会使用这张图片。"); }
+        catch (Exception ex) { MessageBox.Show(this, "未能使用这张图片，原背景已保留。\n" + ex.Message, "选择背景图片", MessageBoxButton.OK, MessageBoxImage.Information); }
+    }
+    private void ResetBackground(object sender, RoutedEventArgs e)
+    {
+        if (clock != null) return;
+        try { appearance.Reset(); ApplyAppearance(); Status("已恢复纯色背景，原始图片未改动。"); }
+        catch (Exception ex) { Status("恢复纯色失败：" + ex.Message); }
+    }
     private static string[] Lines(string text) => text.Split(['\r', '\n', ',', '，', ';'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
     private bool SaveAllSettings()
     {
@@ -102,9 +141,9 @@ public partial class MainWindow : Window
         currentTask = string.IsNullOrWhiteSpace(TaskInput.Text) ? "一段专注时间" : TaskInput.Text.Trim();
         try { store.RecoverInterrupted(DateTimeOffset.Now); sessionId = store.BeginSession(currentTask, plannedSeconds, DateTimeOffset.Now); }
         catch (Exception ex) { Status("无法保存记录，未开启限制：" + ex.Message); return; }
-        clock = new FocusClock(plannedSeconds); breaking = false; lastTimestamp = Stopwatch.GetTimestamp();
+        clock = new FocusClock(plannedSeconds); breaking = false; lastTimestamp = Stopwatch.GetTimestamp(); nextHeatmapRefresh = 30;
         SessionLabel.Text = shortTest ? "10 秒验收 · 使用独立测试记录" : "正在专注 · 一次只做一件事";
-        SetActiveUi(true); UpdateTimer(); Page("focus");
+        SetActiveUi(true); UpdateTimer(); RefreshStatistics(); Page("focus");
         bridge.Publish(true, settings.BlockedDomains, clock.RemainingSeconds);
         Status(settings.BlockedDomains.Length > 0 ? "专注已开始；网站限制需要已连接的浏览器扩展。" : hotkeyRegistered ? "专注已开始；Ctrl + Alt + Esc 可立即退出。" : "专注已开始；紧急退出按钮始终可用（快捷键被占用）。");
         if (settings.Immersive) EnterFullscreen();
@@ -125,9 +164,11 @@ public partial class MainWindow : Window
         EmergencyButton.Content = breaking ? "结束休息" : "紧急退出";
         FullscreenButton.Visibility = active && !breaking ? Visibility.Visible : Visibility.Collapsed;
         SetupPanel.IsEnabled = !active; TaskInput.IsEnabled = !active; AppsInput.IsEnabled = !active; DomainsInput.IsEnabled = !active;
+        ChooseBackgroundButton.IsEnabled = !active; ResetBackgroundButton.IsEnabled = !active && appearance.BackgroundImage != null;
     }
     private void Tick(object? sender, EventArgs e)
     {
+        UpdateWallClock();
         ApiStatus.Text = bridge.Error != null ? "本机连接服务不可用：" + bridge.Error : DateTimeOffset.UtcNow - bridge.LastContact < TimeSpan.FromSeconds(20) ? "● 浏览器扩展已连接（仅代表通信成功）" : "○ 等待扩展连接 · 本机服务已就绪";
         if (clock == null) return;
         var now = Stopwatch.GetTimestamp(); var delta = Stopwatch.GetElapsedTime(lastTimestamp, now).TotalSeconds; lastTimestamp = now;
@@ -139,6 +180,7 @@ public partial class MainWindow : Window
             catch (Exception ex) { ReleaseForError(); Status("记录写入失败，已解除限制。最后部分时长可能未保存：" + ex.Message); return; }
         }
         UpdateTimer();
+        if (clock.ElapsedSeconds >= nextHeatmapRefresh) { nextHeatmapRefresh = clock.ElapsedSeconds + 30; RefreshStatistics(); }
         if (clock.IsComplete) { Finish("completed", breaking ? "休息结束，可以开始下一段专注了。" : "这一段完成了。休息一下，再出发。"); return; }
         if (!breaking)
         {
@@ -152,14 +194,14 @@ public partial class MainWindow : Window
         if (clock == null) return;
         TimerText.Text = FormatTime(clock.RemainingSeconds); TimerProgress.Value = (double)clock.ElapsedSeconds / plannedSeconds;
         immersion?.UpdateTime(TimerText.Text);
-        Title = $"{TimerText.Text} · 专注花园" + (App.TestMode ? " [独立验收模式]" : "");
+        Title = $"{TimerText.Text} · 专注花园 0.2" + (App.TestMode ? " [独立验收模式]" : "");
     }
     private static string FormatTime(int seconds) => $"{seconds / 60:00}:{seconds % 60:00}";
     private void EnterFullscreenClick(object sender, RoutedEventArgs e) => EnterFullscreen();
     private void EnterFullscreen()
     {
         if (clock == null || breaking || immersion != null) return;
-        immersion = new ImmersionWindow(currentTask, hotkeyRegistered, ConfirmEmergency) { Owner = this };
+        immersion = new ImmersionWindow(currentTask, hotkeyRegistered, appearance.BackgroundImage, ConfirmEmergency) { Owner = this };
         immersion.UpdateTime(FormatTime(clock.RemainingSeconds)); immersion.Show();
     }
     private void EmergencyClick(object sender, RoutedEventArgs e) => ConfirmEmergency();
@@ -187,7 +229,7 @@ public partial class MainWindow : Window
             try { store.EndSession(id.Value, status, DateTimeOffset.Now); }
             catch (Exception ex) { message += " 记录结束状态保存失败，下次启动将恢复为中断：" + ex.Message; }
         }
-        Title = "专注花园 · Focus Garden" + (App.TestMode ? " [独立验收模式]" : "");
+        Title = "专注花园 0.2 · Focus Garden" + (App.TestMode ? " [独立验收模式]" : "");
         SessionLabel.Text = status == "completed" ? "完成一段，让专注慢慢生长。" : "下一次，继续从这里开始。";
         Status(message); RefreshStatistics(); Activate();
     }
@@ -237,6 +279,7 @@ public partial class MainWindow : Window
         CompletedStat.Text = sessions.Count(s => s.Status == "completed" && s.EndedAt?.ToLocalTime().Year == year).ToString();
         DaysStat.Text = daily.Count(d => d.Value > 0) + " 天";
         YearLabel.Text = year.ToString(); YearSummary.Text = $"{year} 年累计 {daily.Values.Sum() / 3600.0:0.#} 小时 · 每一格是一天";
+        StatsYearSummary.Text = $"当前统计年份：{year}。年度热力图和年份切换位于番茄钟主页。";
         DrawHeatmap(daily);
         HistoryPanel.Children.Clear();
         var latest = sessions.Take(12).ToArray();
