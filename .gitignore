@@ -9,6 +9,8 @@ node_modules/
 
 # Generated builds, verification output, and local state
 work/
+outputs/
+/qa/
 **/artifacts/
 **/test-results/
 **/playwright-report/

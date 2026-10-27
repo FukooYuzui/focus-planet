@@ -87,7 +87,7 @@ Token 是本机日志中能读取和去重的估算，包含缓存输入，不�
 源码使用 C# / .NET 8 WPF、SQLite 与原生 Viewport3D。只有编译源码时才需要安装 .NET 8 或更新 SDK。在源码目录执行下面的 PowerShell 命令，可生成自带运行时的 Windows x64 单文件版本：
 
 ```powershell
-.\build.ps1 -Destination .\artifacts\FocusPlanet-0.7.4 -WorkDirectory "$env:TEMP\FocusGarden-build-0.7.4"
+.\build.ps1 -Destination .\outputs\FocusPlanet-0.7.4 -WorkDirectory .\work\build
 ```
 
 `Destination` 必须是新的或空的输出目录；脚本不会清理已有文件。`WorkDirectory` 存放构建中间文件，可改成其他工作目录。发布前依次运行十组检查，任一失败即停止；生成单 EXE 后再附带文档和备用扩展。详细操作、数据边界和实际验证结果见 `docs/使用说明.md`、`docs/技术方案.md`、`docs/验收报告.md`。

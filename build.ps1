@@ -1,6 +1,6 @@
 param(
-    [string]$Destination = (Join-Path $PSScriptRoot 'artifacts/FocusPlanet-Windows-x64'),
-    [string]$WorkDirectory = (Join-Path ([System.IO.Path]::GetTempPath()) 'FocusGarden/v074-packaging')
+    [string]$Destination = (Join-Path $PSScriptRoot 'outputs/FocusPlanet-Windows-x64'),
+    [string]$WorkDirectory = (Join-Path $PSScriptRoot 'work/build')
 )
 $ErrorActionPreference = 'Stop'
 $Destination = [System.IO.Path]::GetFullPath($Destination)
