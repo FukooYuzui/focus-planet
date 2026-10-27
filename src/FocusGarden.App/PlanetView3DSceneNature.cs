@@ -97,20 +97,33 @@ internal static partial class PlanetView3DScene
     private static Model3DGroup SoftTree(double scale,int kind)
     {
         var g=new Model3DGroup();
-        Add(g,PlanetView3DGeometry.Frustum(.036,.022,.25,8),"#947654");
-        DetailBeam(g,new(0,.12,0),new(-.08,.30,.02),.022,"#947654");DetailBeam(g,new(0,.17,0),new(.09,.33,-.03),.018,"#A2865C");
+        NatureStem(g,new(0,.012,0),new(.012,.29,-.006),.035,"#947654");
+        NatureStem(g,new(.005,.15,0),new(-.10,.33,.025),.021,"#947654");
+        NatureStem(g,new(.008,.19,-.004),new(.10,.37,-.045),.018,"#A2865C");
+        NatureStem(g,new(.006,.22,0),new(-.025,.40,.085),.014,"#A2865C");
+        for(int root=0;root<3;root++)
+        {
+            double a=root*2*Math.PI/3+.25;
+            NatureStem(g,new(0,.055,0),new(Math.Cos(a)*.075,.008,Math.Sin(a)*.065),.018,"#8B7154");
+        }
         if(kind==0)
         {
-            Add(g,PlanetView3DGeometry.Frustum(.18,.055,.25,12,.14),"#579277");Add(g,PlanetView3DGeometry.Frustum(.15,.025,.24,12,.30),"#70A68A");Add(g,PlanetView3DGeometry.Frustum(.10,0,.21,12,.46),"#81B49A");
+            NatureNeedleTier(g,.18,.26,.14,-.012,"#579277");
+            NatureNeedleTier(g,.145,.24,.30,.012,"#70A68A");
+            NatureNeedleTier(g,.095,.21,.46,.018,"#81B49A");
         }
         else
         {
             string leaf=kind==1?"#8CB883":"#D3B89A";string light=kind==1?"#A5C795":"#E0C6AC";
-            DetailRound(g,-.08,.34,.03,.16,.17,.14,leaf,true);DetailRound(g,.09,.37,-.025,.15,.17,.15,leaf,true);DetailRound(g,0,.48,.005,.17,.17,.15,light,true);
-            if(kind==1)foreach(var p in new[]{new Point3D(-.16,.36,.08),new(.16,.37,.03),new(.035,.49,.15)})DetailRound(g,p.X,p.Y,p.Z,.025,.028,.025,"#DEB475");
-            else foreach(var p in new[]{new Point3D(-.13,.40,.12),new(.12,.47,.08),new(-.02,.59,.06)})DetailRound(g,p.X,p.Y,p.Z,.032,.024,.030,"#E9C9BA");
+            NatureCanopy(g,new(-.10,.32,-.025),new(.14,.135,.12),leaf);
+            NatureCanopy(g,new(.10,.35,-.035),new(.13,.14,.125),leaf);
+            NatureCanopy(g,new(-.045,.405,.085),new(.13,.12,.11),light);
+            NatureCanopy(g,new(.045,.435,-.085),new(.115,.13,.105),leaf);
+            NatureCanopy(g,new(0,.515,.015),new(.12,.11,.11),light);
+            foreach(var p in new[]{new Point3D(-.145,.35,.08),new(.15,.38,.045),new(.025,.51,.12)})
+                NatureRound(g,p.X,p.Y,p.Z,.025,.026,.025,kind==1?"#DEB475":"#E9C9BA");
         }
-        DetailRound(g,-.05,.012,.05,.08,.017,.06,"#7DA079");return ScaleGroup(g,scale);
+        NatureRound(g,-.05,.012,.05,.08,.017,.06,"#7DA079");return ScaleGroup(g,scale);
     }
     private static Model3DGroup ShrubPatch(double scale)
     {
@@ -164,38 +177,247 @@ internal static partial class PlanetView3DScene
     }
     private static Model3DGroup SoftSheep()
     {
-        var g=new Model3DGroup();foreach(double x in new[]{-.08,.08})foreach(double z in new[]{-.055,.055})DetailBox(g,x-.013,.005,z-.013,.026,.085,.026,"#7C7566");
-        DetailRound(g,0,.14,0,.15,.105,.10,"#EFE6CD",true);
-        foreach(var p in new[]{new Point3D(-.08,.20,.025),new(.025,.235,0),new(.08,.20,-.015)})DetailRound(g,p.X,p.Y,p.Z,.070,.060,.075,"#F0E9D6");
-        DetailRound(g,.15,.16,.005,.065,.07,.062,"#8F8D7B");DetailRound(g,.18,.14,.025,.05,.035,.045,"#9E9A85");
-        DetailRound(g,.14,.205,.067,.048,.018,.021,"#B8AD93");DetailRound(g,.14,.205,-.059,.048,.018,.021,"#B8AD93");AnimalEye(g,.185,.18,.055);AnimalEye(g,.185,.18,-.05);DetailRound(g,-.15,.16,0,.044,.043,.04,"#EFE6CD");return g;
+        var g=new Model3DGroup();
+        foreach(double x in new[]{-.085,.078})foreach(double z in new[]{-.052,.052})
+        {
+            NatureStem(g,new(x,.095,z),new(x+.007,.020,z),.016,"#9D937A");
+            DetailBox(g,x-.013,.004,z-.015,.033,.025,.030,"#665E50");
+        }
+        DetailRound(g,-.008,.14,0,.145,.094,.096,"#DED9C3",true);
+        // A close scalloped fleece layer follows the torso, instead of raising three large balls above it.
+        foreach(var p in new[]{new Point3D(-.095,.185,-.035),new(-.030,.215,-.035),new(.045,.208,-.025),
+            new(-.100,.145,.067),new(-.022,.168,.085),new(.060,.163,.073),new(-.040,.165,-.080),new(.070,.150,-.067)})
+            DetailRound(g,p.X,p.Y,p.Z,.062,.049,.056,p.Z>0?"#F1EAD7":"#E8E1CB");
+        DetailRound(g,.145,.167,0,.061,.065,.054,"#8F8D7B");
+        NatureRound(g,.190,.142,0,.044,.030,.039,"#B3A990",1);
+        foreach(int side in new[]{-1,1})
+        {
+            NatureBlade(g,new(.127,.207,side*.045),new(.139,.213,side*.101),new(.025,0,0),.008,"#B8AD93");
+            NatureBlade(g,new(.129,.215,side*.055),new(.138,.218,side*.091),new(.014,0,0),.003,"#D8C4AD");
+            NatureRound(g,.223,.148,side*.017,.006,.005,.005,"#756E5D");
+        }
+        DetailBeam(g,new(.226,.133,-.014),new(.226,.132,.014),.003,"#80715E");
+        AnimalEye(g,.184,.185,.048);AnimalEye(g,.184,.185,-.048);
+        DetailRound(g,-.153,.155,0,.038,.041,.037,"#EFE6CD");return g;
     }
     private static Model3DGroup SoftRabbit()
     {
-        var g=new Model3DGroup();DetailRound(g,-.025,.09,0,.092,.10,.077,"#D7C8AE",true);DetailRound(g,.065,.16,0,.064,.067,.058,"#E9D8BE",true);
-        foreach(double z in new[]{-.032,.032}){DetailRound(g,.054,.255,z,.023,.092,.022,"#D6C5AD");DetailRound(g,.063,.258,z+.009,.011,.065,.012,"#D3A8A6");DetailRound(g,.045,.018,z*1.5,.057,.025,.026,"#E0CFB4");}
-        AnimalEye(g,.105,.174,.045);AnimalEye(g,.105,.174,-.045);DetailRound(g,.125,.145,0,.012,.010,.014,"#BE9692");DetailRound(g,-.12,.09,0,.036,.037,.035,"#F0E4D1");return g;
+        var g=new Model3DGroup();DetailRound(g,-.035,.092,0,.093,.098,.077,"#D7C8AE",true);
+        DetailRound(g,.063,.164,0,.061,.065,.054,"#E9D8BE",true);
+        foreach(int side in new[]{-1,1})
+        {
+            double z=side*.031;
+            double earLean=side>0?8:13;
+            NatureTiltRound(g,new(.035,.282,z),new(.023,.086,.021),"#D6C5AD",new(0,0,1),earLean);
+            NatureTiltRound(g,new(.052,.290,z),new(.0085,.062,.0125),"#D5AAA6",new(0,0,1),earLean);
+            DetailRound(g,-.060,.067,side*.046,.055,.060,.043,"#CCB99E");
+            DetailRound(g,.008,.019,side*.056,.062,.024,.030,"#E1D0B7");
+            for(int toe=0;toe<2;toe++)DetailBeam(g,new(.043,.037,side*.056+(toe-.5)*.015),new(.060,.031,side*.056+(toe-.5)*.015),.0028,"#BDA68E");
+            NatureStem(g,new(.063,.103,side*.028),new(.075,.025,side*.032),.013,"#D9C8AE");
+            NatureRound(g,.085,.019,side*.031,.027,.016,.019,"#EADAC1",1);
+            NatureRound(g,.115,.141,side*.017,.024,.018,.021,"#F0E1CD");
+        }
+        AnimalEye(g,.104,.180,.043);AnimalEye(g,.104,.180,-.043);
+        NatureRound(g,.136,.150,0,.010,.008,.011,"#BE9692");
+        DetailBeam(g,new(.136,.143,0),new(.137,.131,0),.003,"#9E817A");
+        foreach(int side in new[]{-1,1})DetailBeam(g,new(.137,.131,0),new(.132,.128,side*.014),.0028,"#9E817A");
+        DetailRound(g,-.126,.100,0,.032,.034,.032,"#F2E8D8");return g;
     }
     private static Model3DGroup Fox()
     {
-        var g=new Model3DGroup();DetailRound(g,-.01,.105,0,.135,.075,.073,"#CA9470",true);foreach(double x in new[]{-.09,.07})foreach(double z in new[]{-.045,.045})DetailBox(g,x,.005,z,.024,.075,.024,"#8D735D");
-        DetailRound(g,.12,.17,0,.068,.072,.063,"#D7A17A");DetailRound(g,.17,.14,0,.06,.030,.042,"#E7CFAC");
-        foreach(double z in new[]{-.04,.04}){var ear=new Model3DGroup();Add(ear,PlanetView3DGeometry.Frustum(.034,0,.085,4),"#C58A66");ear.Transform=new TranslateTransform3D(.105,.205,z);g.Children.Add(ear);}
-        DetailRound(g,-.17,.13,.015,.14,.052,.058,"#C98F67");DetailRound(g,-.28,.14,.015,.060,.041,.043,"#EAD8B9");AnimalEye(g,.16,.18,.047);AnimalEye(g,.16,.18,-.047);DetailRound(g,.22,.145,0,.012,.011,.017,"#4E5146");return g;
+        var g=new Model3DGroup();DetailRound(g,-.012,.109,0,.135,.073,.071,"#CA9470",true);
+        foreach(double x in new[]{-.09,.070})foreach(double z in new[]{-.045,.045})
+        {
+            NatureStem(g,new(x,.110,z),new(x+.005,.025,z),.015,"#A17A5D");
+            NatureRound(g,x+.014,.017,z,.028,.018,.019,"#655749");
+        }
+        DetailRound(g,.115,.170,0,.064,.069,.060,"#D7A17A",true);
+        NatureStem(g,new(.151,.148,0),new(.229,.145,0),.026,"#E9D6B8",.039);
+        NatureBlade(g,new(.057,.095,0),new(.108,.186,0),new(0,0,.045),.021,"#E9DCC0");
+        foreach(int side in new[]{-1,1})
+        {
+            NatureFoxEar(g,side);
+            NatureBlade(g,new(.126,.137,side*.047),new(.172,.153,side*.035),new(0,.019,0),.006,"#E9D5B6");
+        }
+        DetailRound(g,-.176,.143,.020,.135,.051,.056,"#C98F67");
+        NatureTiltRound(g,new(-.294,.170,.032),new(.073,.029,.034),"#EBDCC0",new(0,0,1),-15);
+        AnimalEye(g,.158,.184,.046);AnimalEye(g,.158,.184,-.046);
+        NatureRound(g,.229,.145,0,.011,.010,.015,"#4E5146");
+        DetailBeam(g,new(.200,.133,-.015),new(.225,.134,0),.003,"#8A6754");
+        DetailBeam(g,new(.200,.133,.015),new(.225,.134,0),.003,"#8A6754");return g;
     }
     private static Model3DGroup Duck()
     {
-        var g=new Model3DGroup();DetailRound(g,-.015,.075,0,.13,.072,.082,"#E7DFBA",true);DetailRound(g,.10,.15,0,.055,.060,.05,"#6D9D86",true);DetailRound(g,.15,.13,0,.055,.017,.032,"#DDB36E");DetailRound(g,-.03,.09,.068,.075,.042,.020,"#CBBE94");
-        AnimalEye(g,.126,.165,.041);AnimalEye(g,.126,.165,-.041);DetailBox(g,-.05,0,-.065,.07,.013,.035,"#CDA165");DetailBox(g,-.05,0,.03,.07,.013,.035,"#CDA165");return g;
+        var g=new Model3DGroup();DetailRound(g,-.020,.077,0,.127,.071,.080,"#E7DFBA",true);
+        NatureStem(g,new(.063,.092,0),new(.090,.151,0),.035,"#CFD8B8");
+        DetailRound(g,.099,.154,0,.052,.057,.047,"#6D9D86",true);
+        NatureBlade(g,new(.136,.137,0),new(.207,.132,0),new(0,0,.029),.009,"#DDB36E");
+        foreach(int side in new[]{-1,1})
+        {
+            DetailRound(g,-.034,.091,side*.066,.076,.041,.022,"#C6B992");
+            for(int feather=0;feather<3;feather++)
+                NatureBlade(g,new(.010-feather*.013,.108-feather*.010,side*.081),new(-.109+feather*.008,.088-feather*.010,side*.084),new(0,.010,0),.004,feather%2==0?"#E2D5AF":"#B5AA84");
+            NatureRound(g,.173,.141,side*.012,.0045,.003,.0035,"#8F714E");
+            NatureWebFoot(g,-.018,side*.042);
+            NatureBlade(g,new(-.110,.083,side*.014),new(-.174,.105,side*.027),new(0,.012,0),.011,"#D7C9A3");
+        }
+        DetailBeam(g,new(.159,.126,-.024),new(.198,.127,-.012),.0028,"#B88E56");
+        DetailBeam(g,new(.159,.126,.024),new(.198,.127,.012),.0028,"#B88E56");
+        AnimalEye(g,.126,.169,.039);AnimalEye(g,.126,.169,-.039);return g;
     }
     private static Model3DGroup Deer()
     {
-        var g=new Model3DGroup();DetailRound(g,-.01,.16,0,.14,.075,.072,"#B89775",true);foreach(double x in new[]{-.095,.07})foreach(double z in new[]{-.045,.045})DetailBox(g,x,.005,z,.018,.14,.018,"#947C61");
-        DetailRound(g,.105,.235,0,.044,.11,.045,"#C3A280");DetailRound(g,.145,.31,0,.062,.055,.046,"#CBAE89");DetailRound(g,.19,.29,0,.042,.026,.035,"#D8C3A2");foreach(double z in new[]{-.05,.05})DetailRound(g,.11,.35,z,.045,.018,.025,"#B99B78");
-        foreach(double z in new[]{-.028,.028}){DetailBeam(g,new(.12,.35,z),new(.095,.43,z*1.4),.012,"#9D8869");DetailBeam(g,new(.10,.40,z*1.2),new(.065,.42,z*2),.009,"#9D8869");}
-        AnimalEye(g,.17,.32,.038);AnimalEye(g,.17,.32,-.038);foreach(double x in new[]{-.08,-.02,.045})DetailRound(g,x,.185,.067,.014,.012,.006,"#E9D9B9");return g;
+        var g=new Model3DGroup();DetailRound(g,-.014,.166,0,.139,.073,.070,"#B89775",true);
+        foreach(double x in new[]{-.095,.070})foreach(double z in new[]{-.045,.045})
+        {
+            NatureStem(g,new(x,.164,z),new(x+.008,.023,z),.013,"#A58A6C");
+            DetailBox(g,x-.004,.004,z-.012,.028,.023,.024,"#655E51");
+        }
+        DetailRound(g,.103,.237,0,.044,.107,.043,"#C3A280");
+        DetailRound(g,.146,.312,0,.060,.054,.044,"#CBAE89",true);
+        NatureStem(g,new(.173,.296,0),new(.224,.285,0),.023,"#DFCAAA",.032);
+        NatureRound(g,.224,.285,0,.011,.010,.018,"#615748");
+        NatureBlade(g,new(.080,.164,0),new(.110,.270,0),new(0,0,.026),.012,"#E3D3B3");
+        foreach(int side in new[]{-1,1})
+        {
+            NatureBlade(g,new(.105,.344,side*.028),new(.086,.380,side*.098),new(.030,0,0),.009,"#AD8E6B");
+            NatureBlade(g,new(.108,.352,side*.040),new(.093,.374,side*.084),new(.017,0,0),.003,"#DCC6A7");
+            NatureStem(g,new(.120,.352,side*.025),new(.108,.410,side*.037),.010,"#9D8869");
+            NatureStem(g,new(.108,.410,side*.037),new(.077,.466,side*.047),.007,"#B3A082");
+            NatureStem(g,new(.109,.403,side*.035),new(.060,.430,side*.073),.006,"#A59174");
+            NatureStem(g,new(.096,.433,side*.041),new(.126,.461,side*.071),.005,"#BAA88A");
+            foreach(var p in new[]{new Point3D(-.088,.186,side*.064),new(-.035,.194,side*.068),new(.020,.184,side*.067),new(-.061,.154,side*.071)})
+                NatureRound(g,p.X,p.Y,p.Z,.013,.010,.005,"#EADBBE");
+        }
+        NatureBlade(g,new(-.143,.176,0),new(-.188,.204,0),new(0,0,.017),.009,"#E3D5B9");
+        AnimalEye(g,.172,.325,.037);AnimalEye(g,.172,.325,-.037);
+        DetailBeam(g,new(.205,.274,-.013),new(.224,.277,0),.0028,"#90785E");
+        DetailBeam(g,new(.205,.274,.013),new(.224,.277,0),.0028,"#90785E");return g;
     }
-    private static void AnimalEye(Model3DGroup g,double x,double y,double z){DetailRound(g,x,y,z,.009,.011,.007,"#394B42");DetailRound(g,x+.003,y+.003,z>0?z+.005:z-.005,.003,.004,.003,"#EFE8D2");}
+    private static void AnimalEye(Model3DGroup g,double x,double y,double z)
+    {
+        DetailRound(g,x,y,z,.009,.011,.007,"#394B42");
+        NatureRound(g,x+.003,y+.003,z>0?z+.005:z-.005,.003,.004,.003,"#EFE8D2");
+    }
+
+    // Small highlights and markings share the existing 20-face sphere; silhouettes use the larger meshes.
+    private static void NatureRound(Model3DGroup group,double x,double y,double z,double rx,double ry,double rz,string color,int detail=0)
+    {
+        var child=new Model3DGroup();Add(child,PlanetView3DGeometry.SmoothUnitSphere(detail),color);
+        var transform=new Transform3DGroup();transform.Children.Add(new ScaleTransform3D(rx,ry,rz));transform.Children.Add(new TranslateTransform3D(x,y,z));
+        transform.Freeze();child.Transform=transform;group.Children.Add(child);
+    }
+
+    private static void NatureTiltRound(Model3DGroup group,Point3D center,Vector3D size,string color,Vector3D axis,double angle)
+    {
+        var child=new Model3DGroup();Add(child,PlanetView3DGeometry.SmoothUnitSphere(1),color);
+        var transform=new Transform3DGroup();transform.Children.Add(new ScaleTransform3D(size));
+        transform.Children.Add(new RotateTransform3D(new AxisAngleRotation3D(axis,angle)));
+        transform.Children.Add(new TranslateTransform3D((Vector3D)center));transform.Freeze();child.Transform=transform;group.Children.Add(child);
+    }
+
+    private static readonly MeshGeometry3D NatureFoxEarMesh=CreateNatureFoxEarMesh();
+    private static MeshGeometry3D CreateNatureFoxEarMesh()
+    {
+        // Keep an ellipsoid's rounded volume, tapering the upper half into a soft triangular ear.
+        var mesh=PlanetView3DGeometry.SmoothUnitSphere(1).Clone();
+        for(int i=0;i<mesh.Positions.Count;i++)
+        {
+            var p=mesh.Positions[i];mesh.Positions[i]=new(p.X*(.78-.28*p.Y),p.Y,p.Z*(.92-.15*p.Y));
+        }
+        mesh.Freeze();return mesh;
+    }
+    private static void NatureFoxEar(Model3DGroup group,int side)
+    {
+        var child=new Model3DGroup();Add(child,NatureFoxEarMesh,"#C68D67");
+        var transform=new Transform3DGroup();transform.Children.Add(new ScaleTransform3D(.040,.046,.021));
+        transform.Children.Add(new RotateTransform3D(new AxisAngleRotation3D(new(1,0,0),side*12)));
+        transform.Children.Add(new TranslateTransform3D(.100,.247,side*.044));transform.Freeze();child.Transform=transform;group.Children.Add(child);
+        NatureTiltRound(group,new(.106,.251,side*.060),new(.015,.030,.005),"#8F6A59",new(1,0,0),side*12);
+    }
+
+    private static readonly MeshGeometry3D NatureTaperMesh=PlanetView3DGeometry.Frustum(1,.42,1,6);
+    private static void NatureStem(Model3DGroup group,Point3D start,Point3D end,double radius,string color,double? secondRadius=null)
+    {
+        var direction=end-start;double length=direction.Length;direction.Normalize();
+        var axis=Vector3D.CrossProduct(new(0,1,0),direction);if(axis.LengthSquared<1e-12)axis=new(1,0,0);
+        var child=new Model3DGroup();Add(child,NatureTaperMesh,color);
+        var transform=new Transform3DGroup();transform.Children.Add(new ScaleTransform3D(radius,length,secondRadius??radius));
+        transform.Children.Add(new RotateTransform3D(new AxisAngleRotation3D(axis,Vector3D.AngleBetween(new(0,1,0),direction))));
+        transform.Children.Add(new TranslateTransform3D((Vector3D)start));transform.Freeze();child.Transform=transform;group.Children.Add(child);
+    }
+
+    // Twelve closed faces form an ear, feather or fur tip with a pointed silhouette and a shallow central ridge.
+    private static void NatureBlade(Model3DGroup group,Point3D root,Point3D tip,Vector3D width,double depth,string color)
+    {
+        var direction=tip-root;var normal=Vector3D.CrossProduct(direction,width);normal.Normalize();
+        Point3D[] edge=[root,root+direction*.28+width*.82,root+direction*.63+width,tip,
+            root+direction*.63-width,root+direction*.28-width*.82];
+        var center=root+direction*.47;var front=center+normal*depth;var back=center-normal*depth;var mesh=new MeshGeometry3D();
+        for(int i=0;i<edge.Length;i++)
+        {
+            NatureFace(mesh,edge[i],front,edge[(i+1)%edge.Length],center);
+            NatureFace(mesh,edge[i],edge[(i+1)%edge.Length],back,center);
+        }
+        mesh.Freeze();Add(group,mesh,color);
+    }
+    private static void NatureFace(MeshGeometry3D mesh,Point3D a,Point3D b,Point3D c,Point3D center)
+    {
+        var midpoint=new Point3D((a.X+b.X+c.X)/3,(a.Y+b.Y+c.Y)/3,(a.Z+b.Z+c.Z)/3);
+        if(Vector3D.DotProduct(Vector3D.CrossProduct(b-a,c-a),midpoint-center)<0)(b,c)=(c,b);
+        PlanetView3DGeometry.Triangle(mesh,a,b,c);
+    }
+    private static void NatureWebFoot(Model3DGroup group,double x,double z)
+    {
+        (double X,double Z)[] outline=[(-.018,-.012),(.030,-.033),(.062,-.029),(.049,-.009),(.068,0),(.049,.009),(.062,.029),(.030,.033),(-.018,.012)];
+        var mesh=new MeshGeometry3D();var center=new Point3D(x+.02,.007,z);
+        for(int i=0;i<outline.Length;i++)
+        {
+            var a=outline[i];var b=outline[(i+1)%outline.Length];
+            Point3D p=new(x+a.X,.012,z+a.Z),q=new(x+b.X,.012,z+b.Z),r=new(x+a.X,.002,z+a.Z),s=new(x+b.X,.002,z+b.Z);
+            NatureFace(mesh,new(x+.02,.012,z),p,q,center);NatureFace(mesh,new(x+.02,.002,z),s,r,center);
+            NatureFace(mesh,p,r,s,center);NatureFace(mesh,p,s,q,center);
+        }
+        mesh.Freeze();Add(group,mesh,"#CDA165");
+    }
+
+    private static readonly MeshGeometry3D NatureCanopyMesh=CreateNatureCanopyMesh();
+    private static MeshGeometry3D CreateNatureCanopyMesh()
+    {
+        var mesh=PlanetView3DGeometry.SmoothUnitSphere(1).Clone();
+        for(int i=0;i<mesh.Positions.Count;i++)
+        {
+            var p=mesh.Positions[i];double ripple=1+.075*Math.Sin(p.X*5+p.Z*2)*Math.Cos(p.Y*4-p.Z*3);
+            mesh.Positions[i]=new(p.X*ripple,p.Y*(1+.035*Math.Sin(p.X*4-p.Z*3)),p.Z*ripple);
+        }
+        mesh.Freeze();return mesh;
+    }
+    private static void NatureCanopy(Model3DGroup group,Point3D center,Vector3D size,string color)
+    {
+        var child=new Model3DGroup();Add(child,NatureCanopyMesh,color);
+        var transform=new Transform3DGroup();transform.Children.Add(new ScaleTransform3D(size));transform.Children.Add(new TranslateTransform3D((Vector3D)center));
+        transform.Freeze();child.Transform=transform;group.Children.Add(child);
+    }
+    private static void NatureNeedleTier(Model3DGroup group,double radius,double height,double y,double lean,string color)
+    {
+        var mesh=new MeshGeometry3D();double[] levels=[0,.12,.46,.78];double[] radii=[.88,1,.64,.30];const int sides=10;
+        Point3D Ring(int ring,int side)
+        {
+            double a=(side%sides)*2*Math.PI/sides;double ripple=1+.06*Math.Sin(a*3+.8);
+            return new(Math.Cos(a)*radius*radii[ring]*ripple+lean*levels[ring]*levels[ring],y+height*levels[ring],Math.Sin(a)*radius*radii[ring]*ripple);
+        }
+        for(int ring=0;ring<levels.Length-1;ring++)for(int i=0;i<sides;i++)
+        {
+            var p=Ring(ring,i);var q=Ring(ring,i+1);var r=Ring(ring+1,i);var s=Ring(ring+1,i+1);
+            NatureFace(mesh,p,r,q,new(0,y+height*.3,0));NatureFace(mesh,q,r,s,new(0,y+height*.3,0));
+        }
+        for(int i=0;i<sides;i++)
+        {
+            NatureFace(mesh,Ring(0,i),new(0,y,0),Ring(0,i+1),new(0,y+height*.3,0));
+            NatureFace(mesh,Ring(3,i),new(lean,y+height,0),Ring(3,i+1),new(0,y+height*.3,0));
+        }
+        mesh.Freeze();Add(group,mesh,color);
+    }
     private static Model3DGroup SoftCloud()
     {
         var g=new Model3DGroup();DetailRound(g,-.23,0,.01,.22,.12,.16,"#DCE8E3",true);DetailRound(g,-.02,.07,0,.27,.19,.21,"#F0F0E4",true);DetailRound(g,.23,.02,0,.21,.14,.17,"#E8ECE2",true);DetailRound(g,.08,-.04,.08,.28,.10,.14,"#DEE7DF",true);return g;

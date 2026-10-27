@@ -15,6 +15,7 @@ internal static class Program
     private static int Main(string[] args)
     {
         if(args.Length==2&&args[0]=="--render-ecology-only"){RenderEcology(args[1]);return 0;}
+        if(args.Length==2&&args[0]=="--render-models-only"){RenderModelSheet(args[1]);return 0;}
         if(args.Length==4&&args[0] is "--render-only" or "--render-edit-only" or "--render-surface-only"){Render(args[1],int.Parse(args[2]),args[3],args[0]=="--render-edit-only",args[0]=="--render-surface-only");return 0;}
         int pass=0,fail=0;
         void Test(string name,Action action){try{action();Console.WriteLine("PASS "+name);pass++;}catch(Exception ex){Console.WriteLine("FAIL "+name+": "+ex);fail++;}}
@@ -364,6 +365,38 @@ internal static class Program
             }
             finally{if(nextHost is not null){nextHost.Content=null;nextHost.Close();}host.Content=null;host.Close();PumpFor(TimeSpan.FromMilliseconds(40));}
         });
+        Test("refined models keep finite plot-sized bounds and healthy surface geometry",()=>
+        {
+            foreach(string kind in new[]{"rabbit","sheep","fox","duck","deer","butterfly","pond","meadow","mushroom","orchard","rockgarden","bush","tree","mountain"})
+            {
+                var model=ModelForInspection(kind);CheckGroup(model);var bounds=model.Bounds;
+                Assert(!bounds.IsEmpty&&new[]{bounds.X,bounds.Y,bounds.Z,bounds.SizeX,bounds.SizeY,bounds.SizeZ}.All(double.IsFinite),$"{kind} has invalid bounds");
+                Assert(bounds.SizeX>0&&bounds.SizeY>0&&bounds.SizeZ>0,$"{kind} lost a dimension");
+                Assert(bounds.SizeX<=1.25&&bounds.SizeY<=1.25&&bounds.SizeZ<=1.25,$"{kind} grew outside a reasonable plot footprint");
+                Assert(bounds.Y>=-.08&&Math.Abs(bounds.X+bounds.SizeX/2)<.45&&Math.Abs(bounds.Z+bounds.SizeZ/2)<.45,$"{kind} is displaced from its surface anchor");
+                Console.WriteLine($"  Model {kind}: {Triangles(model):N0} triangles, {GeometryLeaves(model).Count()} parts, bounds {bounds.SizeX:0.000} × {bounds.SizeY:0.000} × {bounds.SizeZ:0.000}");
+            }
+        });
+        Test("animals expose dark facial details from both sides rather than burying one eye",()=>
+        {
+            foreach(string species in new[]{"rabbit","sheep","fox","duck","deer","butterfly"})
+            {
+                var model=ModelForInspection(species);var overall=model.Bounds;bool butterfly=species=="butterfly";
+                var parts=GeometryBounds(model,Matrix3D.Identity).Where(part=>
+                {
+                    var color=DiffuseColor(part.Model.Material);var bounds=part.Bounds;double longest=Math.Max(bounds.SizeX,Math.Max(bounds.SizeY,bounds.SizeZ)),shortest=Math.Min(bounds.SizeX,Math.Min(bounds.SizeY,bounds.SizeZ));
+                    var center=BoundsCenter(bounds);double forward=butterfly?center.Z:center.X;
+                    return color.HasValue&&.2126*color.Value.R+.7152*color.Value.G+.0722*color.Value.B<105&&longest<=.045&&shortest/longest>.25&&center.Y>overall.Y+overall.SizeY*.30&&forward>0;
+                }).ToArray();
+                var visual=new ModelVisual3D {Content=model};
+                foreach(int side in new[]{-1,1})
+                {
+                    var candidates=parts.Where(part=>(butterfly?BoundsCenter(part.Bounds).X:BoundsCenter(part.Bounds).Z)*side>.006).ToArray();
+                    Assert(candidates.Length>0,$"{species} lacks a separate dark facial detail on side {side}");
+                    Assert(candidates.Any(part=>VisibleFromSide(visual,part.Model,BoundsCenter(part.Bounds),side,butterfly)),$"{species} facial detail on side {side} is hidden behind the head or another large part");
+                }
+            }
+        });
         Console.WriteLine($"{pass} passed / {fail} failed");
         if(args.Length==4&&args[0] is "--render" or "--render-edit")Render(args[1],int.Parse(args[2]),args[3],args[0]=="--render-edit");
         return fail==0?0:1;
@@ -378,6 +411,42 @@ internal static class Program
         Grid.SetRow(control,1);layout.Children.Add(control);layout.Measure(new Size(width,height));layout.Arrange(new Rect(0,0,width,height));layout.UpdateLayout();
         if(edit){control.SetEditMode(true);control.SelectPlot(0);layout.UpdateLayout();}
         var bitmap=new RenderTargetBitmap(width,height,96,96,PixelFormats.Pbgra32);bitmap.Render(layout);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));var absolute=Path.GetFullPath(path);Directory.CreateDirectory(Path.GetDirectoryName(absolute)!);using var stream=File.Create(absolute);encoder.Save(stream);Console.WriteLine("Synthetic demonstration preview: "+absolute);
+    }
+    private static void RenderModelSheet(string path)
+    {
+        const int width=1600,height=1600;
+        var background=new SolidColorBrush(Color.FromRgb(14,23,30));
+        var root=new Grid {Width=width,Height=height,Background=background};
+        root.RowDefinitions.Add(new RowDefinition {Height=new GridLength(105)});root.RowDefinitions.Add(new RowDefinition());
+        var title=new StackPanel {Margin=new Thickness(28,20,28,12)};
+        title.Children.Add(new TextBlock {Text="专注星球 · 真实模型接触表",FontFamily=new FontFamily("Microsoft YaHei UI"),FontSize=30,Foreground=Brushes.White});
+        title.Children.Add(new TextBlock {Text="六种生物 · 六种自然景观 · 树木与山体 · 固定三分之四视角，末两格查看另一侧五官",FontFamily=new FontFamily("Microsoft YaHei UI"),FontSize=16,Foreground=new SolidColorBrush(Color.FromRgb(178,199,193)),Margin=new Thickness(0,8,0,0)});
+        root.Children.Add(title);
+        var cards=new System.Windows.Controls.Primitives.UniformGrid {Rows=4,Columns=4,Margin=new Thickness(16,0,16,16)};Grid.SetRow(cards,1);root.Children.Add(cards);
+        var items=new[]{("rabbit","兔子",false),("sheep","绵羊",false),("fox","狐狸",false),("duck","鸭子",false),("deer","鹿",false),("butterfly","蝴蝶",false),("pond","池塘",false),("meadow","草地",false),("mushroom","蘑菇丛",false),("orchard","果树",false),("rockgarden","岩石庭园",false),("bush","灌木",false),("tree","树木",false),("mountain","山体",false),("rabbit","兔子 · 另一侧",true),("fox","狐狸 · 另一侧",true)};
+        foreach(var (kind,label,opposite) in items)
+        {
+            var model=ModelForInspection(kind);var bounds=model.Bounds;int triangles=Triangles(model);
+            double longest=Math.Max(bounds.SizeX,Math.Max(bounds.SizeY,bounds.SizeZ));Assert(longest>0&&double.IsFinite(longest));
+            double scale=1.9/longest;var center=new Point3D(bounds.X+bounds.SizeX/2,bounds.Y+bounds.SizeY/2,bounds.Z+bounds.SizeZ/2);
+            var subject=new Model3DGroup();subject.Children.Add(model);var transform=new Transform3DGroup();transform.Children.Add(new ScaleTransform3D(scale,scale,scale));transform.Children.Add(new TranslateTransform3D(-center.X*scale,-center.Y*scale,-center.Z*scale));subject.Transform=transform;subject.Freeze();
+            var scene=new Model3DGroup();scene.Children.Add(new AmbientLight(Color.FromRgb(132,143,141)));scene.Children.Add(new DirectionalLight(Color.FromRgb(255,245,222),new Vector3D(-.7,-1,-1.6)));scene.Children.Add(new DirectionalLight(Color.FromRgb(105,135,151),new Vector3D(1,.2,.8)));scene.Children.Add(subject);
+            double z=opposite?-4:4;var camera=new OrthographicCamera(new Point3D(3.2,2.2,z),new Vector3D(-3.2,-2.2,-z),new Vector3D(0,1,0),3.0);
+            var viewport=new Viewport3D {Camera=camera,ClipToBounds=true};viewport.Children.Add(new ModelVisual3D {Content=scene});
+            var content=new Grid {Margin=new Thickness(12)};content.RowDefinitions.Add(new RowDefinition {Height=GridLength.Auto});content.RowDefinitions.Add(new RowDefinition());content.RowDefinitions.Add(new RowDefinition {Height=GridLength.Auto});
+            content.Children.Add(new TextBlock {Text=label,FontFamily=new FontFamily("Microsoft YaHei UI"),FontSize=19,Foreground=Brushes.White,Margin=new Thickness(2,0,0,5)});
+            Grid.SetRow(viewport,1);content.Children.Add(viewport);
+            var metrics=new TextBlock {Text=$"{triangles:N0} 三角形 · {GeometryLeaves(model).Count()} 个几何部件",FontFamily=new FontFamily("Microsoft YaHei UI"),FontSize=12,Foreground=new SolidColorBrush(Color.FromRgb(159,182,174)),Margin=new Thickness(2,6,0,0)};Grid.SetRow(metrics,2);content.Children.Add(metrics);
+            cards.Children.Add(new Border {Background=new SolidColorBrush(Color.FromRgb(27,39,47)),BorderBrush=new SolidColorBrush(Color.FromRgb(49,66,73)),BorderThickness=new Thickness(1),CornerRadius=new CornerRadius(10),Margin=new Thickness(6),Child=content});
+        }
+        root.Measure(new Size(width,height));root.Arrange(new Rect(0,0,width,height));root.UpdateLayout();
+        var bitmap=new RenderTargetBitmap(width,height,96,96,PixelFormats.Pbgra32);bitmap.Render(root);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));var absolute=Path.GetFullPath(path);Directory.CreateDirectory(Path.GetDirectoryName(absolute)!);using var stream=File.Create(absolute);encoder.Save(stream);
+        Console.WriteLine("Real WPF model contact sheet: "+absolute);
+    }
+    private static Model3DGroup ModelForInspection(string kind)
+    {
+        const System.Reflection.BindingFlags flags=System.Reflection.BindingFlags.Static|System.Reflection.BindingFlags.NonPublic;
+        return kind=="mountain"?(Model3DGroup)typeof(PlanetView3DScene).GetMethod("Mountain",flags)!.Invoke(null,[.38,.58])!:(Model3DGroup)typeof(PlanetView3DScene).GetMethod("PlaceableModel",flags)!.Invoke(null,[kind])!;
     }
     private static void RenderEcology(string path)
     {
@@ -443,6 +512,30 @@ internal static class Program
     {
         if(model is GeometryModel3D geometry)yield return geometry;
         else if(model is Model3DGroup group)foreach(var child in group.Children)foreach(var leaf in GeometryLeaves(child))yield return leaf;
+    }
+    private static IEnumerable<(GeometryModel3D Model,Rect3D Bounds)> GeometryBounds(Model3D model,Matrix3D parent)
+    {
+        var current=model.Transform.Value;current.Append(parent);
+        if(model is GeometryModel3D geometry)yield return(geometry,new MatrixTransform3D(current).TransformBounds(geometry.Geometry.Bounds));
+        else if(model is Model3DGroup group)foreach(var child in group.Children)foreach(var leaf in GeometryBounds(child,current))yield return leaf;
+    }
+    private static Point3D BoundsCenter(Rect3D bounds)=>new(bounds.X+bounds.SizeX/2,bounds.Y+bounds.SizeY/2,bounds.Z+bounds.SizeZ/2);
+    private static Color? DiffuseColor(Material material)
+    {
+        if(material is DiffuseMaterial diffuse&&diffuse.Brush is SolidColorBrush solid)return solid.Color;
+        if(material is MaterialGroup group)foreach(var child in group.Children)if(DiffuseColor(child) is {} color)return color;
+        return null;
+    }
+    private static bool VisibleFromSide(ModelVisual3D visual,GeometryModel3D expected,Point3D center,int side,bool butterfly)
+    {
+        foreach(double horizontal in new[]{0.0,-.002,.002})foreach(double vertical in new[]{0.0,-.002,.002})
+        {
+            var point=butterfly?new Point3D(center.X,center.Y+vertical,center.Z+horizontal):new Point3D(center.X+horizontal,center.Y+vertical,center.Z);
+            var outward=butterfly?new Vector3D(side,0,0):new Vector3D(0,0,side);GeometryModel3D? first=null;
+            VisualTreeHelper.HitTest(visual,null,result=>{if(result is RayMeshGeometry3DHitTestResult hit){first=hit.ModelHit as GeometryModel3D;return HitTestResultBehavior.Stop;}return HitTestResultBehavior.Continue;},new RayHitTestParameters(point+outward*2,-outward));
+            if(ReferenceEquals(first,expected))return true;
+        }
+        return false;
     }
     private static (int Triangles,int GeometryModels,int UniqueMeshes) SceneMetrics(PlanetScene scene)=>Metrics(GeometryLeaves(scene.Model).Concat(scene.Motions.SelectMany(m=>GeometryLeaves(m.Model))));
     private static (int Triangles,int GeometryModels,int UniqueMeshes) Metrics(IEnumerable<GeometryModel3D> geometry)

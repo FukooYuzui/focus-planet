@@ -134,7 +134,7 @@ internal static partial class PlanetView3DScene
     }
     private static Model3DGroup Mountain(double radius,double height)
     {
-        var g=new Model3DGroup();Add(g,PlanetView3DGeometry.Frustum(radius,0,height,5,-.035),"#8B9B8C");Add(g,PlanetView3DGeometry.Frustum(radius*.34,0,height*.34,5,height*.66-.035),"#E2E5D6");return g;
+        return SculptedMountain(radius,height);
     }
     private static Model3DGroup Tree(double scale,bool round)
     {
@@ -180,6 +180,6 @@ internal static partial class PlanetView3DScene
     }
     private static void Add(Model3DGroup group,MeshGeometry3D mesh,string color,bool emissive=false,bool doubleSided=false)
     {
-        var material=SharedMaterial(color,emissive);var model=new GeometryModel3D(mesh,material);if(doubleSided)model.BackMaterial=material;group.Children.Add(model);
+        var material=FinishedMaterial(color,emissive);var model=new GeometryModel3D(mesh,material);if(doubleSided)model.BackMaterial=material;group.Children.Add(model);
     }
 }
