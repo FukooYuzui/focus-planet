@@ -36,7 +36,7 @@ internal static class Program
                 var s = Field<PlanetSnapshot>(fresh, "planetSnapshot");
                 Assert(s.TotalGrowth == 0 && s.Level == 0);
                 Assert(Field<FrameworkElement>(fresh, "PlanetPage").Visibility == Visibility.Visible);
-                Assert(fresh.Title.Contains("专注星球 0.6"));
+                Assert(fresh.Title.Contains("专注星球 " + App.CurrentVersion));
             });
             Run("new focus feeds planet once and page navigation preserves timer setup", () =>
             {
@@ -130,6 +130,23 @@ internal static class Program
                 }
                 Call(mature,"Page","focus");Call(mature,"Page","planet");Assert(IsSurface());
                 SetSurface(false);
+            });
+            Run("ecology choices show categories and save all twelve new kinds", () =>
+            {
+                var choice=Field<ComboBox>(mature,"PlanetBuildingChoice");
+                Assert(choice.Items.Count==18);
+                var used=Field<IReadOnlyList<PlanetBuildingPlacement>>(mature,"planetBuildings").Select(b=>b.PlotId).ToHashSet();
+                var free=new Queue<int>(Enumerable.Range(0,32).Where(p=>!used.Contains(p)));
+                foreach(var kind in new[]{"pond","meadow","mushroom","orchard","rockgarden","bush","rabbit","sheep","fox","duck","deer","butterfly"})
+                {
+                    choice.SelectedValue=kind;
+                    Assert(Field<TextBlock>(mature,"PlanetLayoutHint").Text.Contains(PlanetLayoutCatalog.Get(kind).Hint));
+                    Event(mature,"StartPlanetPlacement");Call(mature,"PlanetPlotClicked",free.Dequeue());
+                }
+                using var persisted=new PlanetLayoutStore(Path.Combine(maturePath,"planet-layout.db"));
+                Assert(persisted.GetBuildings(planetId.ToString()).Count==20);
+                Assert(persisted.GetBuildings(planetId.ToString()).Count(b=>PlanetLayoutCatalog.IsAnimal(b.Kind))==6);
+                Field<CheckBox>(mature,"PlanetEditCheck").IsChecked=false;Event(mature,"TogglePlanetEdit");
             });
             Run("failed growth commit prevents travel and later retry credits original planet", () =>
             {

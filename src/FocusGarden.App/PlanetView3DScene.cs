@@ -4,7 +4,8 @@ using FocusGarden.Core;
 
 namespace FocusGarden.App;
 
-internal sealed record PlanetSceneMotion(Model3DGroup Model,Transform3D Surface,string Kind);
+internal sealed record PlanetSceneMotion(Model3DGroup Model,Transform3D Surface,string Kind,
+    string Species,Vector3D Home,Vector3D Destination,string? Habitat,double Radius,double Heading,double Phase);
 internal sealed record PlanetScene(Model3DGroup Model, IReadOnlyDictionary<string, int> Features, IReadOnlyDictionary<GeometryModel3D,int> PlotHits,IReadOnlyList<PlanetSceneMotion> Motions);
 
 internal static partial class PlanetView3DScene
@@ -15,14 +16,16 @@ internal static partial class PlanetView3DScene
     {
         if(level is <0 or >5)throw new ArgumentOutOfRangeException(nameof(level));
         if(weather is not ("clear" or "cloudy" or "rain" or "aurora"))throw new ArgumentException("Unknown weather.",nameof(weather));
+        if(buildings is not null&&(buildings.Count>32||buildings.Count(p=>PlanetLayoutCatalog.IsAnimal(p.Kind))>PlanetLayoutCatalog.AnimalLimitPerPlanet))throw new ArgumentException("Too many placed objects.",nameof(buildings));
         var world=new Model3DGroup(); var features=new Dictionary<string,int>(); var random=new Random(seed);var hitPlots=new Dictionary<GeometryModel3D,int>();var motions=new List<PlanetSceneMotion>();
+        var habitats=new List<(string Kind,Vector3D Normal)>();
         void Count(string name) => features[name]=features.GetValueOrDefault(name)+1;
         world.Children.Add(PlanetSurface(level));
         Count("terrain");
         // Landmarks use local Y as their up direction, rotated into the actual surface normal.
         Place(43,-31,Mountain(.38,.58),"mountain"); Place(46,-17,Mountain(.28,.39),"mountain"); Place(34,-39,Mountain(.23,.32),"mountain");
         if(!NearPlot(-26,125))Place(-26,125,Mountain(.31,.48),"mountain");if(!NearPlot(6,-115))Place(6,-115,Mountain(.25,.35),"mountain");
-        var sites=NatureSites(random,125);
+        var sites=CachedNatureSites(seed);
         for(int i=0;i<Math.Min(sites.Count,level==0?74:90);i++)
         {
             var site=sites[i];double size=.68+random.NextDouble()*.30;
@@ -38,8 +41,8 @@ internal static partial class PlanetView3DScene
                 else if(i%9==4){piece=ShrubPatch(size);key="shrub";}
                 else if(i%9==5){piece=Wildflowers(size);key="flowers";}
                 else if(i%9==6){piece=Mushrooms(size);key="mushrooms";}
-                else if(i%9==7){piece=RockCluster(size*.8);key="rocks";}
-                else {piece=level>=2?MeadowHabitat(size):CrystalCluster(size*.7);key=level>=2?"habitat":"crystal";}
+                else if(i%9==7){piece=i%18==7?PlaceableModel("pond"):RockCluster(size*.8);key=i%18==7?"pond":"rocks";}
+                else {piece=level>=2?PlaceableModel("meadow"):CrystalCluster(size*.7);key=level>=2?"meadow":"crystal";}
                 Place(site.Lat,site.Lon,piece,key,heading:random.Next(360));
             }
         }
@@ -51,10 +54,10 @@ internal static partial class PlanetView3DScene
         }
         if(level>=2)
         {
-            for(int i=90;i<Math.Min(sites.Count,level>=5?108:102);i++)
+            for(int i=90;i<Math.Min(sites.Count,102);i++)
             {
-                var site=sites[i];var animal=(i%5) switch {0=>SoftSheep(),1=>SoftRabbit(),2=>Fox(),3=>Duck(),_=>Deer()};
-                Place(site.Lat,site.Lon,animal,"creature",heading:random.Next(360));
+                var site=sites[i];string species=(i%6) switch {0=>"sheep",1=>"rabbit",2=>"fox",3=>"duck",4=>"deer",_=>"butterfly"};
+                Place(site.Lat,site.Lon,PlaceableModel(species),species,heading:random.Next(360));
             }
         }
         if(level>=5)
@@ -64,7 +67,7 @@ internal static partial class PlanetView3DScene
         foreach(var building in buildings??[])
         {
             if(building.PlotId is <0 or >=32||building.QuarterTurns is <0 or >3)throw new ArgumentException("Invalid building placement.",nameof(buildings));
-            Model3DGroup obj=building.Kind switch {"tree"=>SoftTree(1,1),"flower"=>Wildflowers(1.2),"house"=>DetailedHouse("#F0DEB8","#BD7963"),"windmill"=>DetailedWindmill(),"tower"=>DetailedTower(),"observatory"=>DetailedObservatory(),_=>throw new ArgumentException("Unknown building kind.",nameof(buildings))};
+            Model3DGroup obj=PlaceableModel(building.Kind);
             var plot=Plots[building.PlotId];Place(plot.Latitude,plot.Longitude,obj,building.Kind,heading:building.QuarterTurns*90);
             if(editMode)MapHits(obj,building.PlotId);
         }
@@ -94,12 +97,21 @@ internal static partial class PlanetView3DScene
             }
         }
         // Local window light is subtle during the day and brighter against the night lighting.
+        ResolveHabitats(motions,habitats);
         world.Freeze();return new(world,features,hitPlots,motions);
         void Place(double lat,double lon,Model3DGroup obj,string type,double radius=2.69,double heading=0)
         {
             var surface=PlanetView3DGeometry.SurfaceTransform(lat,lon,radius,heading);
-            if(type is "creature" or "cloud"){obj.Freeze();motions.Add(new(obj,surface,type));}
+            bool animal=PlanetLayoutCatalog.IsAnimal(type);
+            var normal=PlanetView3DGeometry.Direction(lat,lon);
+            if(animal||type=="cloud")
+            {
+                obj.Freeze();motions.Add(new(obj,surface,animal?"creature":"cloud",animal?type:"",normal,normal,null,radius,heading,motions.Count*3.71));
+                if(animal)Count("creature");
+            }
             else {obj.Transform=surface;world.Children.Add(obj);}Count(type);
+            string habitat=type switch {"flowers"=>"flower","shrub"=>"bush","mushrooms"=>"mushroom","habitat"=>"meadow",_=>type};
+            if(habitat is "tree" or "flower" or "pond" or "meadow" or "mushroom" or "orchard" or "bush")habitats.Add((habitat,normal));
         }
         void MapHits(Model3D model,int plotId){if(model is GeometryModel3D geometry)hitPlots[geometry]=plotId;else if(model is Model3DGroup group)foreach(var child in group.Children)MapHits(child,plotId);}
     }

@@ -104,11 +104,13 @@ public partial class MainWindow
             {
                 displayedPlanetLevel = s.Level;
                 var choice = PlanetBuildingChoice.SelectedValue as string;
-                PlanetBuildingChoice.ItemsSource = PlanetLayoutCatalog.Entries.Where(d => d.RequiredLevel <= s.Level).Select(d => new BuildingChoice(d.Kind, $"{d.Name} · 最多 {d.MaxCount} 个")).ToArray();
+                PlanetBuildingChoice.ItemsSource = PlanetLayoutCatalog.Entries.Where(d => d.RequiredLevel <= s.Level)
+                    .OrderBy(d => d.Category switch { "建筑" => 0, "景观" => 1, _ => 2 })
+                    .Select(d => new BuildingChoice(d.Kind, $"{d.Category} · {d.Name}（{d.MaxCount}{(d.Category == "生物" ? "只" : "个")}）")).ToArray();
                 PlanetBuildingChoice.DisplayMemberPath = nameof(BuildingChoice.Label); PlanetBuildingChoice.SelectedValuePath = nameof(BuildingChoice.Kind);
                 PlanetBuildingChoice.SelectedValue = choice;
                 if (PlanetBuildingChoice.SelectedIndex < 0) PlanetBuildingChoice.SelectedIndex = 0;
-                if (s.Level == 0) PlanetLayoutHint.Text = "星球还很荒凉。累计 150 点后解锁树木和花朵，再逐步建设家园。";
+                if (s.Level == 0) PlanetLayoutHint.Text = "累计 150 点后解锁树木、花丛和更多景观；2 级迎来小动物。\n" + PlanetChoiceHint("rockgarden");
             }
             UpdatePlanetLayoutButtons();
             return true;
@@ -170,8 +172,38 @@ public partial class MainWindow
         planetView?.SetEditMode(enabled);
         PlanetSceneHost.Height = 650;
         placingPlanetKind = null; movingPlanetBuilding = null; selectedPlanetPlot = null;
-        PlanetLayoutHint.Text = enabled ? "选择一种景观或建筑并点击放置，也可以点击已有建筑所在的地块进行调整。" : "布局已自动保存。拖动星球可以查看各处活动。";
+        PlanetLayoutHint.Text = enabled ? "选择建筑、景观或生物并点击放置，也可以点击已有内容所在的地块进行调整。" : "布局已自动保存。拖动星球可以查看各处活动。";
         UpdatePlanetLayoutButtons();
+    }
+    private void PlanetBuildingChoiceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (PlanetBuildingChoice.SelectedItem is not BuildingChoice choice) return;
+        PlanetLayoutHint.Text = PlanetChoiceHint(choice.Kind);
+    }
+    private string PlanetChoiceHint(string kind)
+    {
+        var definition = PlanetLayoutCatalog.Get(kind);
+        var pairing = kind switch
+        {
+            "rabbit" => "适合搭配草地、花丛或灌木。",
+            "sheep" => "适合搭配草地、果树或树木。",
+            "fox" => "适合搭配树木、灌木或蘑菇丛。",
+            "duck" => "适合搭配池塘。",
+            "deer" => "适合搭配池塘、树木或果树。",
+            "butterfly" => "适合搭配花丛、果树或蘑菇丛。",
+            "pond" => "可在附近放置鸭子或鹿。",
+            "meadow" => "可与兔子或绵羊相邻。",
+            "flower" => "可与蝴蝶或兔子相邻。",
+            "mushroom" => "可与狐狸或蝴蝶相邻。",
+            "tree" => "可与鹿、绵羊或狐狸相邻。",
+            "orchard" => "可与鹿、绵羊或蝴蝶相邻。",
+            "bush" => "可与狐狸或兔子相邻。",
+            "rockgarden" => "可与树木和花丛搭配；动物不会把岩石庭园作为互动目标。",
+            _ => "解锁后可反复移动、旋转或收起，不消耗成长值。"
+        };
+        var animalCount = planetBuildings.Count(p => PlanetLayoutCatalog.IsAnimal(p.Kind));
+        return $"{definition.Category} · {definition.Name} · 每颗最多 {definition.MaxCount}{(definition.Category == "生物" ? "只" : "个")}\n"
+            + definition.Hint + " " + pairing + $"\n生物合计 {animalCount}/{PlanetLayoutCatalog.AnimalLimitPerPlanet} 只；每颗星球最多 12 只，让小世界保持轻快。";
     }
     private void StartPlanetPlacement(object sender, RoutedEventArgs e)
     {
@@ -179,7 +211,7 @@ public partial class MainWindow
         PlanetEditCheck.IsChecked = true; planetView?.SetEditMode(true);
         PlanetSceneHost.Height = 650;
         placingPlanetKind = choice.Kind; movingPlanetBuilding = null;
-        PlanetLayoutHint.Text = "请在星球上点击一个空地块放置。可拖动星球寻找位置。";
+        PlanetLayoutHint.Text = "请在星球上点击一个空地块放置。可拖动星球寻找位置。\n" + PlanetChoiceHint(choice.Kind);
         UpdatePlanetLayoutButtons();
     }
     private PlanetBuildingPlacement? SelectedPlanetBuilding => planetBuildings.FirstOrDefault(b => b.PlotId == selectedPlanetPlot);
@@ -204,7 +236,7 @@ public partial class MainWindow
         {
             selectedPlanetPlot = plot;
             var building = SelectedPlanetBuilding;
-            PlanetLayoutHint.Text = building == null ? $"已选择 {plot + 1} 号空地块。选择建筑并点击“放置”。" : $"已选中 {PlanetLayoutCatalog.Entries.First(d => d.Kind == building.Kind).Name} · {plot + 1} 号地块 · 朝向 {building.QuarterTurns * 90}°";
+            PlanetLayoutHint.Text = building == null ? $"已选择 {plot + 1} 号空地块。选择内容并点击“放置”。" : $"已选中 {PlanetLayoutCatalog.Entries.First(d => d.Kind == building.Kind).Name} · {plot + 1} 号地块 · 朝向 {building.QuarterTurns * 90}°\n" + PlanetChoiceHint(building.Kind);
         }
         UpdatePlanetLayoutButtons();
     });
@@ -212,7 +244,7 @@ public partial class MainWindow
     {
         if (SelectedPlanetBuilding is not { } building) return;
         movingPlanetBuilding = building.Id; placingPlanetKind = null;
-        PlanetLayoutHint.Text = "移动中：点击一个空地块。原位置会保留到移动成功。";
+        PlanetLayoutHint.Text = "移动选中内容：点击一个空地块。原位置会保留到移动成功。";
     }
     private void RotatePlanetBuilding(object sender, RoutedEventArgs e) => PlanetAction(() =>
     {

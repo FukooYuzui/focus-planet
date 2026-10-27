@@ -9,7 +9,7 @@ using FocusGarden.Core;
 namespace FocusGarden.App;
 
 /// <summary>A genuine 3D spherical habitat; it renders only the progression state supplied by its caller.</summary>
-internal sealed class PlanetView3D : UserControl
+internal sealed partial class PlanetView3D : UserControl
 {
     private readonly Viewport3D viewport=new() { ClipToBounds=true,Focusable=true };
     private readonly PerspectiveCamera camera=new() { FieldOfView=42,NearPlaneDistance=.1,FarPlaneDistance=100 };
@@ -29,7 +29,7 @@ internal sealed class PlanetView3D : UserControl
     private int layoutRevision,renderedLayoutRevision=-1;
     private PlanetBuildingPlacement[] buildings=[];
     private IReadOnlyDictionary<GeometryModel3D,int> plotHits=new Dictionary<GeometryModel3D,int>();
-    private readonly List<(TranslateTransform3D Offset,AxisAngleRotation3D Turn,string Kind)> motions=[];
+    private readonly List<SceneActor> motions=[];
     private double animationSeconds;
     private double zoom=1;
     private double orbitZoom=1,surfaceZoom=1,pitchAngle=12;
@@ -40,7 +40,7 @@ internal sealed class PlanetView3D : UserControl
     internal bool IsSurfaceView=>surfaceView;
     internal bool AnimationRunning=>animation.IsEnabled;
     internal int MovingObjectCount=>motions.Count;
-    internal double MotionOffsetTotal=>motions.Sum(m=>m.Offset.OffsetX+m.Offset.OffsetY+m.Turn.Angle);
+    internal double MotionOffsetTotal=>motions.Sum(m=>m.Offset.OffsetX+m.Offset.OffsetY+m.Turn.Angle+m.Surface.Matrix.OffsetX+m.Surface.Matrix.OffsetY+m.Lean.Angle);
     public int? SelectedPlotId {get;private set;}
     public event Action<int>? PlotClicked;
 
@@ -72,9 +72,9 @@ internal sealed class PlanetView3D : UserControl
         viewport.LostMouseCapture+=(_,_)=>StopDrag();
         surface.PreviewMouseWheel+=(_,e)=>{SetZoom(zoom*Math.Pow(surfaceView?.96:.88,e.Delta/120.0));e.Handled=true;};
         viewport.KeyDown+=(_,e)=>{switch(e.Key){case Key.Left:RotateView(surfaceView?-3:-8,0);break;case Key.Right:RotateView(surfaceView?3:8,0);break;case Key.Up:RotateView(0,surfaceView?-2.5:-6);break;case Key.Down:RotateView(0,surfaceView?2.5:6);break;case Key.Home:ResetView();break;case Key.Add:case Key.OemPlus:SetZoom(zoom*(surfaceView?.96:.88));break;case Key.Subtract:case Key.OemMinus:SetZoom(zoom/(surfaceView?.96:.88));break;default:return;}e.Handled=true;};
-        animation.Tick+=(_,_)=>{animationSeconds+=.12;AnimateScene(animationSeconds);if(focusing&&!surfaceView)yawRotation.Angle=(yawRotation.Angle+.045)%360;};
-        Loaded+=(_,_)=>UpdateAnimation();IsVisibleChanged+=(_,_)=>UpdateAnimation();
-        Unloaded+=(_,_)=>{animation.Stop();if(viewport.IsMouseCaptured)viewport.ReleaseMouseCapture();};
+        animation.Tick+=(_,_)=>{if(!IsSceneInView()){animation.Stop();return;}AnimationTickCount++;animationSeconds+=.12;AnimateScene(animationSeconds);if(focusing&&!surfaceView)yawRotation.Angle=(yawRotation.Angle+.045)%360;};
+        Loaded+=(_,_)=>{AttachVisibilityHost();UpdateAnimation();};IsVisibleChanged+=(_,_)=>UpdateAnimation();
+        Unloaded+=(_,_)=>{animation.Stop();DetachVisibilityHost();if(viewport.IsMouseCaptured)viewport.ReleaseMouseCapture();};
         SetState(0,"clear",false,false);
     }
 
@@ -96,7 +96,7 @@ internal sealed class PlanetView3D : UserControl
             var body=new Model3DGroup {Transform=planetTransform};body.Children.Add(built.Model);motions.Clear();
             foreach(var moving in built.Motions)
             {
-                var offset=new TranslateTransform3D();var turn=new AxisAngleRotation3D(new(0,1,0),0);var transform=new Transform3DGroup();transform.Children.Add(new RotateTransform3D(turn));transform.Children.Add(offset);transform.Children.Add(moving.Surface);var group=new Model3DGroup {Transform=transform};group.Children.Add(moving.Model);body.Children.Add(group);motions.Add((offset,turn,moving.Kind));
+                var actor=new SceneActor(moving);var transform=new Transform3DGroup();transform.Children.Add(new RotateTransform3D(actor.Lean));transform.Children.Add(new RotateTransform3D(actor.Turn));transform.Children.Add(actor.Offset);transform.Children.Add(actor.Surface);var group=new Model3DGroup {Transform=transform};group.Children.Add(moving.Model);body.Children.Add(group);motions.Add(actor);
             }
             AnimateScene(animationSeconds);world.Children.Add(body);scene.Content=world;
             currentLevel=level;currentWeather=weather;night=isNight;currentSeed=seed;renderedLayoutRevision=layoutRevision;SceneBuildCount++;UpdateCamera();
@@ -109,7 +109,7 @@ internal sealed class PlanetView3D : UserControl
     {
         Dispatcher.VerifyAccess();ArgumentNullException.ThrowIfNull(placements);
         var snapshot=placements.ToArray();
-        if(snapshot.Any(p=>p is null||string.IsNullOrWhiteSpace(p.Id)||p.PlotId is <0 or >=32||p.QuarterTurns is <0 or >3||p.Kind is not ("tree" or "flower" or "house" or "windmill" or "tower" or "observatory"))||snapshot.Select(p=>p.Id).Distinct(StringComparer.Ordinal).Count()!=snapshot.Length||snapshot.Select(p=>p.PlotId).Distinct().Count()!=snapshot.Length)throw new ArgumentException("建筑须使用唯一 ID 和地块，朝向为 0–3。",nameof(placements));
+        if(snapshot.Any(p=>p is null||string.IsNullOrWhiteSpace(p.Id)||p.PlotId is <0 or >=32||p.QuarterTurns is <0 or >3||!PlanetLayoutCatalog.Entries.Any(d=>d.Kind==p.Kind))||snapshot.Select(p=>p.Id).Distinct(StringComparer.Ordinal).Count()!=snapshot.Length||snapshot.Select(p=>p.PlotId).Distinct().Count()!=snapshot.Length||snapshot.Count(p=>PlanetLayoutCatalog.IsAnimal(p.Kind))>PlanetLayoutCatalog.AnimalLimitPerPlanet)throw new ArgumentException("内容须使用唯一 ID 和地块，朝向为 0–3，生物最多 12 只。",nameof(placements));
         snapshot=snapshot.OrderBy(p=>p.PlotId).ToArray();if(buildings.SequenceEqual(snapshot))return;buildings=snapshot;layoutRevision++;RefreshState();
     }
     public void SetEditMode(bool enabled){Dispatcher.VerifyAccess();if(editMode==enabled)return;editMode=enabled;if(!enabled)SelectedPlotId=null;layoutRevision++;RefreshState();}
@@ -151,17 +151,7 @@ internal sealed class PlanetView3D : UserControl
         System.Windows.Automation.AutomationProperties.SetItemStatus(surfaceButton,surfaceView?"已选择":"未选择");
     }
     private void StopDrag(){dragging=false;Cursor=Cursors.Arrow;UpdateAnimation();}
-    private void UpdateAnimation(){if(IsLoaded&&IsVisible&&((focusing&&!surfaceView)||motions.Count>0)&&!dragging&&!editMode)animation.Start();else animation.Stop();}
-    internal void AnimateScene(double seconds)
-    {
-        for(int i=0;i<motions.Count;i++)
-        {
-            var motion=motions[i];double phase=seconds*(motion.Kind=="cloud"?.22:.65)+i*1.9;
-            motion.Offset.OffsetX=Math.Sin(phase)*(motion.Kind=="cloud"?.12:.035);
-            motion.Offset.OffsetY=motion.Kind=="cloud"?Math.Cos(phase*.7)*.025:Math.Pow(Math.Sin(phase*2),2)*.018;
-            motion.Turn.Angle=Math.Sin(phase*.55)*(motion.Kind=="cloud"?3:9);
-        }
-    }
+    private void UpdateAnimation(){if(IsLoaded&&IsVisible&&IsSceneInView()&&((focusing&&!surfaceView)||motions.Count>0)&&!dragging&&!editMode)animation.Start();else animation.Stop();}
     private void UpdateCamera()
     {
         double aspect=Math.Max(.4,viewport.ActualWidth/Math.Max(1,viewport.ActualHeight));

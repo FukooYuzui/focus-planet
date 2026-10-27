@@ -14,6 +14,7 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        if(args.Length==2&&args[0]=="--render-ecology-only"){RenderEcology(args[1]);return 0;}
         if(args.Length==4&&args[0] is "--render-only" or "--render-edit-only" or "--render-surface-only"){Render(args[1],int.Parse(args[2]),args[3],args[0]=="--render-edit-only",args[0]=="--render-surface-only");return 0;}
         int pass=0,fail=0;
         void Test(string name,Action action){try{action();Console.WriteLine("PASS "+name);pass++;}catch(Exception ex){Console.WriteLine("FAIL "+name+": "+ex);fail++;}}
@@ -35,7 +36,7 @@ internal static class Program
                 var watch=System.Diagnostics.Stopwatch.StartNew();var s=PlanetView3DScene.Build(level,"cloudy",false,42);watch.Stop();
                 int triangles=Triangles(s.Model)+s.Motions.Sum(m=>Triangles(m.Model));Assert(triangles<220000);
                 if(level==0){Assert(s.Features["crater"]>=5&&s.Features["crystal"]>=5&&s.Features["rocks"]>=20);}
-                else Assert(s.Features["tree"]>=25&&s.Features.ContainsKey("mushrooms")&&s.Features.ContainsKey("habitat"));
+                else Assert(s.Features["tree"]>=25&&s.Features.ContainsKey("mushrooms")&&s.Features.ContainsKey("meadow"));
                 Console.WriteLine($"  Lv.{level}: {triangles:N0} triangles, {watch.ElapsedMilliseconds} ms scene build");
             }
         });
@@ -167,6 +168,202 @@ internal static class Program
                 var camera=(PerspectiveCamera)Viewport(c).Camera;Assert(((Vector3D)camera.Position).Length>2.7+camera.NearPlaneDistance);
             }
         });
+        Test("all 18 catalog kinds create finite frozen scenery and respect scene budgets",()=>
+        {
+            Assert(PlanetLayoutCatalog.Entries.Count==18,"The expanded placement catalog should expose 18 supported kinds");
+            foreach(var definition in PlanetLayoutCatalog.Entries)
+            {
+                var layout=Enumerable.Range(0,definition.MaxCount).Select(i=>new PlanetBuildingPlacement($"kind-{definition.Kind}-{i}",definition.Kind,i,i%4)).ToArray();
+                var scene=PlanetView3DScene.Build(5,"cloudy",false,42,layout,true,0);
+                CheckGroup(scene.Model);foreach(var motion in scene.Motions)CheckGroup(motion.Model);
+                Assert(scene.Model.IsFrozen&&scene.Motions.All(m=>m.Model.IsFrozen&&m.Surface.IsFrozen));
+                Assert(scene.PlotHits.Values.Distinct().Count()==PlanetLayoutCatalog.PlotCount);
+                if(PlanetLayoutCatalog.IsAnimal(definition.Kind))
+                    foreach(var placement in layout)Assert(FindPlacedMotion(scene,placement).Species==definition.Kind);
+                var metrics=SceneMetrics(scene);Assert(metrics.Triangles<=220000,$"{definition.Kind} maximum count exceeded 220,000 instance triangles: {metrics.Triangles}");
+                Assert(scene.Motions.Count<=27,$"{definition.Kind} exceeded the total moving-object budget");
+                Console.WriteLine($"  Catalog {definition.Kind} × {definition.MaxCount}: {metrics.Triangles:N0} instance triangles, {metrics.GeometryModels:N0} geometry models, {metrics.UniqueMeshes:N0} unique meshes, {scene.Motions.Count} moving objects");
+            }
+        });
+        Test("every animal can find a real nearby preferred habitat instead of a phantom target",()=>
+        {
+            var preferences=new[]{("rabbit","meadow"),("sheep","meadow"),("fox","bush"),("deer","tree"),("duck","pond"),("butterfly","flower")};
+            var pairs=NearbyPlotPairs();Assert(pairs.Length>0,"No nearby plot fixtures exist");
+            foreach(var (species,habitat) in preferences)
+            {
+                bool found=false;
+                // Level zero has no naturally generated preferred vegetation, so a
+                // successful destination must correspond to our actual placed target.
+                // Some pairs cross the sea; the renderer may correctly reject those.
+                foreach(var pair in pairs)
+                {
+                    var animal=new PlanetBuildingPlacement("preferred-animal",species,pair.First,1);
+                    var target=new PlanetBuildingPlacement("actual-habitat",habitat,pair.Second,0);
+                    var scene=PlanetView3DScene.Build(0,"clear",false,42,[animal,target]);
+                    var motion=FindPlacedMotion(scene,animal);
+                    CheckMotion(motion);
+                    if(motion.Habitat is null)continue;
+                    Assert(motion.Habitat==habitat,$"{species} reported a habitat that does not exist in the fixture");
+                    var targetDirection=PlotDirection(target.PlotId);
+                    double targetDistance=Angle(motion.Destination,targetDirection);
+                    Assert(Angle(motion.Home,targetDirection)<=.680001,"Animal chose a target outside the bounded search radius");
+                    Assert(targetDistance<.15,$"{species} destination is not near the actual {habitat}: {targetDistance}");
+                    if(species=="duck")Assert(targetDistance<1e-6,"Duck should reach the real pond center");
+                    Assert(Angle(motion.Home,motion.Destination)>.005,"A reported habitat interaction never leaves the home plot");
+                    Console.WriteLine($"  {species} → {habitat}: plots {pair.First}/{pair.Second}, destination is {targetDistance:0.0000} rad from real target");
+                    found=true;break;
+                }
+                Assert(found,$"{species} never found its real preferred {habitat} among nearby plot fixtures");
+            }
+        });
+        Test("animals without a preferred habitat use bounded local fallback",()=>
+        {
+            foreach(var definition in PlanetLayoutCatalog.Entries.Where(d=>PlanetLayoutCatalog.IsAnimal(d.Kind)))
+            {
+                var placement=new PlanetBuildingPlacement("no-target-"+definition.Kind,definition.Kind,0,2);
+                var scene=PlanetView3DScene.Build(0,"clear",false,42,[placement,new("unrelated-scenery","rockgarden",1,0)]);
+                var motion=FindPlacedMotion(scene,placement);CheckMotion(motion);
+                Assert(motion.Habitat is null,$"{definition.Kind} invented a preferred habitat in a barren scene");
+                Assert(Angle(motion.Home,motion.Destination)<=.15,$"{definition.Kind} fallback travels too far from home");
+            }
+        });
+        Test("placed instances have distinct hit wrappers but share frozen meshes and materials",()=>
+        {
+            foreach(string kind in new[]{"rabbit","flower","pond","house"})
+            {
+                var scene=PlanetView3DScene.Build(5,"clear",false,42,[new("duplicate-a",kind,0,0),new("duplicate-b",kind,1,2)],true,0);
+                GeometryModel3D[] first,second;
+                if(PlanetLayoutCatalog.IsAnimal(kind))
+                {
+                    first=GeometryLeaves(FindPlacedMotion(scene,new("duplicate-a",kind,0,0)).Model).ToArray();
+                    second=GeometryLeaves(FindPlacedMotion(scene,new("duplicate-b",kind,1,2)).Model).ToArray();
+                    Assert(first.All(model=>scene.PlotHits.TryGetValue(model,out var plot)&&plot==0),"First animal lost its editable hit identity");
+                    Assert(second.All(model=>scene.PlotHits.TryGetValue(model,out var plot)&&plot==1),"Second animal overwrote the first animal's hit identity");
+                }
+                else
+                {
+                    first=scene.PlotHits.Where(kv=>kv.Value==0).Select(kv=>kv.Key).ToArray();
+                    second=scene.PlotHits.Where(kv=>kv.Value==1).Select(kv=>kv.Key).ToArray();
+                }
+                Assert(first.Length>0&&second.Length>0);
+                Assert(!first.Any(a=>second.Any(b=>ReferenceEquals(a,b))),$"{kind} reused geometry wrappers across independently selectable objects");
+                Assert(first.Any(a=>second.Any(b=>ReferenceEquals(a.Geometry,b.Geometry))),$"{kind} did not reuse any mesh between repeated instances");
+                Assert(first.Any(a=>second.Any(b=>ReferenceEquals(a.Material,b.Material))),$"{kind} did not reuse materials");
+                Assert(first.Concat(second).All(model=>model.IsFrozen&&model.Geometry.IsFrozen&&model.Material.IsFrozen));
+            }
+        });
+        Test("maximum legal layouts stay within 32 plots 12 placed animals and 220000 triangles",()=>
+        {
+            var baseline=PlanetView3DScene.Build(5,"rain",false,42);
+            int baselineTriangles=SceneMetrics(baseline).Triangles;
+            var weights=PlanetLayoutCatalog.Entries.Select(d=>(Definition:d,Weight:SceneMetrics(PlanetView3DScene.Build(5,"rain",false,42,[new("weight",d.Kind,0,0)])).Triangles-baselineTriangles)).ToArray();
+            var heaviest=new List<PlanetBuildingPlacement>();int animals=0;
+            foreach(var entry in weights.OrderByDescending(x=>x.Weight))
+                for(int n=0;n<entry.Definition.MaxCount&&heaviest.Count<32;n++)
+                {
+                    bool animal=PlanetLayoutCatalog.IsAnimal(entry.Definition.Kind);if(animal&&animals>=12)break;
+                    heaviest.Add(new("heavy-"+heaviest.Count,entry.Definition.Kind,heaviest.Count,n%4));if(animal)animals++;
+                }
+            Assert(heaviest.Count==32,"The worst-case fixture did not fill every plot");
+            foreach(var layout in new[]{heaviest.ToArray(),MaximumMovingLayout()})
+            foreach(string weather in new[]{"clear","cloudy","rain","aurora"})
+            {
+                var scene=PlanetView3DScene.Build(5,weather,weather=="aurora",42,layout,true,0);
+                var metrics=SceneMetrics(scene);
+                Assert(metrics.Triangles<=220000,$"Full layout with {weather} has {metrics.Triangles} triangles");
+                Assert(scene.Motions.Count<=27,"Natural animals, placed animals and clouds exceed the cap");
+                int placedAnimals=layout.Count(p=>PlanetLayoutCatalog.IsAnimal(p.Kind));
+                Assert(scene.Motions.Count(m=>m.Kind=="creature")-placedAnimals<=12,"Natural animal count exceeds 12");
+                Console.WriteLine($"  Maximum layout ({placedAnimals} placed animals, {weather}): {metrics.Triangles:N0} triangles, {metrics.GeometryModels:N0} geometry models, {metrics.UniqueMeshes:N0} unique meshes, {scene.Motions.Count} moving objects");
+            }
+        });
+        Test("continuous ecology animation preserves the scene and frozen mesh references",()=>
+        {
+            var control=ArrangedPlanet(new Size(1000,700));control.SetState(5,"cloudy",false,false,42);control.SetBuildings(MaximumMovingLayout());
+            var content=Scene(control).Content;int builds=control.SceneBuildCount;
+            var before=GeometryLeaves(content).ToArray();var meshes=before.Select(model=>model.Geometry).ToArray();var materials=before.Select(model=>model.Material).ToArray();
+            Assert(control.MovingObjectCount<=27&&control.InteractionCount>0,"The bounded fixture must contain real habitat interactions");
+            double initialMotion=control.MotionOffsetTotal;
+            for(int tick=1;tick<=360;tick++)control.AnimateScene(tick*.125);
+            var after=GeometryLeaves(Scene(control).Content).ToArray();
+            Assert(ReferenceEquals(content,Scene(control).Content)&&control.SceneBuildCount==builds,"Animation rebuilt the scene");
+            Assert(before.Length==after.Length&&before.Where((model,index)=>!ReferenceEquals(model,after[index])||!ReferenceEquals(meshes[index],after[index].Geometry)||!ReferenceEquals(materials[index],after[index].Material)).Count()==0,"Animation replaced a geometry wrapper, mesh or material");
+            Assert(after.All(model=>model.Geometry.IsFrozen&&model.Material.IsFrozen));
+            Assert(control.MotionOffsetTotal!=initialMotion,"No visible creature or cloud changed its transform");
+        });
+        Test("editing returns all moving objects home and direct animation calls keep them there",()=>
+        {
+            var layout=MaximumMovingLayout();var control=ArrangedPlanet(new Size(1000,700));control.SetState(5,"cloudy",false,false,42);control.SetBuildings(layout);
+            control.AnimateScene(17);control.SetEditMode(true);
+            var expected=PlanetView3DScene.Build(5,"cloudy",false,42,layout,true,-1);
+            var body=((Model3DGroup)Scene(control).Content).Children.OfType<Model3DGroup>().Single(group=>ReferenceEquals(group.Transform,Field<Transform3DGroup>(control,"planetTransform")));
+            var movingGroups=body.Children.OfType<Model3DGroup>().Where(group=>!group.IsFrozen).ToArray();
+            Assert(movingGroups.Length==expected.Motions.Count,"Cannot locate the editable motion wrappers");
+            for(int i=0;i<movingGroups.Length;i++)
+                Assert(FullMatrixClose(movingGroups[i].Transform.Value,expected.Motions[i].Surface.Value),$"Moving object {i} did not return to its home surface/heading");
+            var frozenPose=Signature((Model3DGroup)Scene(control).Content);int builds=control.SceneBuildCount;
+            foreach(double seconds in new[]{0.0,1.0,12.0,500.0})control.AnimateScene(seconds);
+            Assert(frozenPose==Signature((Model3DGroup)Scene(control).Content)&&control.SceneBuildCount==builds,"Direct animation moved editable objects or rebuilt their home pose");
+            Assert(!control.AnimationRunning);
+        });
+        Test("animation culls back-side and out-of-view objects",()=>
+        {
+            var control=ArrangedPlanet(new Size(1000,700));control.SetState(5,"cloudy",false,false,42);control.SetBuildings(MaximumMovingLayout());control.AnimateScene(9);
+            Assert(control.LastAnimatedObjectCount>0&&control.LastCulledObjectCount>0,"Overview should update front objects while skipping hidden ones");
+            Assert(control.LastAnimatedObjectCount+control.LastCulledObjectCount==control.MovingObjectCount);
+            var camera=(PerspectiveCamera)Viewport(control).Camera;var originalLook=camera.LookDirection;
+            camera.LookDirection=(Vector3D)camera.Position;control.AnimateScene(10);
+            Assert(control.LastAnimatedObjectCount==0&&control.LastCulledObjectCount==control.MovingObjectCount,"Objects behind a camera looking away were still animated");
+            camera.LookDirection=originalLook;control.AnimateScene(11);Assert(control.LastAnimatedObjectCount>0,"Objects did not resume when camera returned");
+        });
+        Test("animation tick cost is measured without claiming a hardware-independent deadline",()=>
+        {
+            var control=ArrangedPlanet(new Size(1000,700));control.SetState(5,"cloudy",false,false,42);control.SetBuildings(MaximumMovingLayout());
+            var timer=Field<DispatcherTimer>(control,"animation");Assert(timer.Interval.TotalMilliseconds>=120&&timer.Interval.TotalMilliseconds<=130,"Scene timer should run at approximately 8 Hz");
+            foreach(bool surface in new[]{false,true})
+            {
+                control.SetSurfaceView(surface);for(int i=0;i<80;i++)control.AnimateScene(i*.125);
+                var samples=new double[600];long bytesBefore=GC.GetAllocatedBytesForCurrentThread();
+                for(int i=0;i<samples.Length;i++){long start=System.Diagnostics.Stopwatch.GetTimestamp();control.AnimateScene(10+i*.125);samples[i]=System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds;}
+                long allocated=GC.GetAllocatedBytesForCurrentThread()-bytesBefore;Array.Sort(samples);
+                Assert(samples.All(double.IsFinite));
+                var metrics=Metrics(GeometryLeaves(Scene(control).Content));
+                Console.WriteLine($"  Tick {(surface?"surface":"overview")}: median {samples[300]:0.0000} ms, p95 {samples[569]:0.0000} ms, max {samples[^1]:0.0000} ms, {allocated/(double)samples.Length:0.0} managed bytes/tick; {control.LastAnimatedObjectCount} updated/{control.LastCulledObjectCount} culled; {metrics.Triangles:N0} triangles, {metrics.GeometryModels:N0} models, {metrics.UniqueMeshes:N0} unique meshes. This times managed transform updates, not GPU rendering.");
+            }
+        });
+        Test("real offscreen hosts pause and resume animation on minimize scroll and reattachment",()=>
+        {
+            var control=ArrangedPlanet(new Size(1000,700));control.SetState(3,"cloudy",true,false,42);
+            var stack=new StackPanel();stack.Children.Add(control);stack.Children.Add(new Border {Height=2200});
+            var scroll=new ScrollViewer {Content=stack,VerticalScrollBarVisibility=ScrollBarVisibility.Auto};
+            var host=OffscreenHost(scroll);Window? nextHost=null;
+            try
+            {
+                host.Show();PumpUntil(()=>control.IsLoaded&&control.AnimationRunning,"Initial offscreen host did not start animation");
+                var timer=Field<DispatcherTimer>(control,"animation");
+                Assert(ReferenceEquals(Field<Window?>(control,"animationHost"),host)&&ReferenceEquals(Field<ScrollViewer?>(control,"animationScroll"),scroll));
+                host.WindowState=WindowState.Minimized;PumpUntil(()=>!control.AnimationRunning&&!control.IsSceneInView(),"Minimized host did not stop animation");
+                long ticks=control.AnimationTickCount;double motion=control.MotionOffsetTotal;var orientation=Orientation(control);
+                PumpFor(TimeSpan.FromMilliseconds(360));
+                Assert(control.AnimationTickCount==ticks&&control.MotionOffsetTotal==motion&&MatrixClose(orientation,Orientation(control)),"Minimized host still advanced the scene timer");
+                host.WindowState=WindowState.Normal;PumpUntil(()=>control.AnimationRunning&&control.AnimationTickCount>ticks,"Restored host did not resume animation");
+                control.Visibility=Visibility.Collapsed;PumpUntil(()=>!control.AnimationRunning,"Collapsed page kept animating");ticks=control.AnimationTickCount;PumpFor(TimeSpan.FromMilliseconds(300));Assert(control.AnimationTickCount==ticks);
+                control.Visibility=Visibility.Visible;PumpUntil(()=>control.AnimationRunning&&control.AnimationTickCount>ticks,"Visible page did not resume animation");
+                scroll.ScrollToVerticalOffset(control.ActualHeight+100);scroll.UpdateLayout();
+                PumpUntil(()=>!control.IsSceneInView()&&!control.AnimationRunning,"Scrolling the scene out of view did not pause it");ticks=control.AnimationTickCount;PumpFor(TimeSpan.FromMilliseconds(300));Assert(control.AnimationTickCount==ticks);
+                scroll.ScrollToTop();scroll.UpdateLayout();PumpUntil(()=>control.IsSceneInView()&&control.AnimationRunning&&control.AnimationTickCount>ticks,"Scrolling back did not resume animation");
+                stack.Children.Remove(control);PumpUntil(()=>!control.IsLoaded&&!control.AnimationRunning,"Unloaded control kept animating");
+                Assert(Field<Window?>(control,"animationHost") is null&&Field<ScrollViewer?>(control,"animationScroll") is null,"Old host event references survived unload");
+                nextHost=OffscreenHost(control);nextHost.Left=-22000;nextHost.Show();
+                PumpUntil(()=>control.IsLoaded&&control.AnimationRunning,"Reattached control did not restart");
+                Assert(ReferenceEquals(timer,Field<DispatcherTimer>(control,"animation")),"Reattachment replaced the scene timer");
+                Assert(ReferenceEquals(Field<Window?>(control,"animationHost"),nextHost)&&Field<ScrollViewer?>(control,"animationScroll") is null,"Reattachment still refers to the old window or scroll container");
+                ticks=control.AnimationTickCount;host.WindowState=WindowState.Minimized;
+                PumpUntil(()=>control.AnimationRunning&&control.AnimationTickCount>ticks,"Changing the detached old window affected the new animation host");
+                nextHost.Content=null;PumpUntil(()=>!control.AnimationRunning,"Final detachment did not stop the timer");
+            }
+            finally{if(nextHost is not null){nextHost.Content=null;nextHost.Close();}host.Content=null;host.Close();PumpFor(TimeSpan.FromMilliseconds(40));}
+        });
         Console.WriteLine($"{pass} passed / {fail} failed");
         if(args.Length==4&&args[0] is "--render" or "--render-edit")Render(args[1],int.Parse(args[2]),args[3],args[0]=="--render-edit");
         return fail==0?0:1;
@@ -182,13 +379,115 @@ internal static class Program
         if(edit){control.SetEditMode(true);control.SelectPlot(0);layout.UpdateLayout();}
         var bitmap=new RenderTargetBitmap(width,height,96,96,PixelFormats.Pbgra32);bitmap.Render(layout);var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));var absolute=Path.GetFullPath(path);Directory.CreateDirectory(Path.GetDirectoryName(absolute)!);using var stream=File.Create(absolute);encoder.Save(stream);Console.WriteLine("Synthetic demonstration preview: "+absolute);
     }
+    private static void RenderEcology(string path)
+    {
+        const int width=1280,height=900;
+        var layout=new Grid {Width=width,Height=height,Background=new SolidColorBrush(Color.FromRgb(12,22,28))};
+        layout.RowDefinitions.Add(new RowDefinition {Height=GridLength.Auto});layout.RowDefinitions.Add(new RowDefinition());
+        var heading=new StackPanel {Margin=new Thickness(30,22,30,10)};
+        heading.Children.Add(new TextBlock {Text="专注星球 · 生机相伴",FontFamily=new FontFamily("Microsoft YaHei UI"),FontSize=27,Foreground=Brushes.White});
+        heading.Children.Add(new TextBlock {Text="合成生态布局 · 地表近景 · 鸭子与池塘、兔子与草地、鹿与果树、蝴蝶与花丛",FontFamily=new FontFamily("Microsoft YaHei UI"),FontSize=14,Foreground=new SolidColorBrush(Color.FromRgb(190,207,200)),Margin=new Thickness(0,7,0,0),TextWrapping=TextWrapping.Wrap});
+        heading.Children.Add(new TextBlock {Text="仅为功能演示，不代表真实专注时长或成长记录。",FontFamily=new FontFamily("Microsoft YaHei UI"),FontSize=12,Foreground=new SolidColorBrush(Color.FromRgb(142,163,158)),Margin=new Thickness(0,5,0,0)});layout.Children.Add(heading);
+        var preferredCenter=PlanetView3DGeometry.Direction(20,0);
+        var pairs=NearbyPlotPairs().OrderBy(pair=>Angle(PlotDirection(pair.First)+PlotDirection(pair.Second),preferredCenter)).ToArray();
+        var placements=new List<PlanetBuildingPlacement>();var used=new HashSet<int>();
+        foreach(var (species,habitat) in new[]{("duck","pond"),("rabbit","meadow"),("deer","orchard"),("butterfly","flower")})
+        {
+            bool placed=false;
+            foreach(var pair in pairs)
+            {
+                if(used.Contains(pair.First)||used.Contains(pair.Second))continue;
+                var animal=new PlanetBuildingPlacement("demo-"+species,species,pair.First,0);
+                var target=new PlanetBuildingPlacement("demo-"+habitat,habitat,pair.Second,0);
+                var probe=PlanetView3DScene.Build(2,"clear",false,42,[animal,target]);
+                var candidateMotion=FindPlacedMotion(probe,animal);
+                if(candidateMotion.Habitat!=habitat||Angle(candidateMotion.Destination,PlotDirection(target.PlotId))>(species=="duck"?1e-6:.15))continue;
+                placements.Add(animal);placements.Add(target);used.Add(pair.First);used.Add(pair.Second);placed=true;break;
+            }
+            Assert(placed,"Cannot construct a real habitat pair for ecology preview: "+species);
+        }
+        var control=new PlanetView3D();control.SetState(2,"clear",false,false,42);control.SetBuildings(placements);control.SetSurfaceView(true);control.SetZoom(1.08);
+        var dominantTarget=placements.Single(p=>p.Kind=="pond");var center=PlanetView3DScene.Plots[dominantTarget.PlotId];
+        Grid.SetRow(control,1);layout.Children.Add(control);layout.Measure(new Size(width,height));layout.Arrange(new Rect(0,0,width,height));layout.UpdateLayout();
+        // Compose around the actual pond location in the existing 3D camera,
+        // rather than guessing a geographic latitude that may clip the subject.
+        double bestScore=double.PositiveInfinity,bestYaw=0,bestPitch=0;
+        for(int yaw=-15;yaw<=15;yaw+=3)for(int pitch=-15;pitch<=15;pitch+=3)
+        {
+            double candidateYaw=6-center.Longitude+yaw,candidatePitch=center.Latitude-35+pitch;
+            control.ResetView();control.SetZoom(1.08);control.RotateView(candidateYaw,candidatePitch);
+            var camera=(PerspectiveCamera)Viewport(control).Camera;
+            var point=Orientation(control).Transform((Point3D)(PlotDirection(dominantTarget.PlotId)*2.72));
+            var delta=point-camera.Position;var forward=camera.LookDirection;forward.Normalize();var up=camera.UpDirection;up.Normalize();var right=Vector3D.CrossProduct(forward,up);right.Normalize();
+            double depth=Vector3D.DotProduct(delta,forward);if(depth<=0)continue;
+            double tangent=Math.Tan(camera.FieldOfView*Math.PI/360),aspect=Viewport(control).ActualWidth/Viewport(control).ActualHeight;
+            double x=.5+Vector3D.DotProduct(delta,right)/(2*depth*tangent),y=.5-Vector3D.DotProduct(delta,up)*aspect/(2*depth*tangent);
+            var ray=delta/delta.Length;double along=Vector3D.DotProduct((Vector3D)camera.Position,ray),discriminant=along*along-(((Vector3D)camera.Position).LengthSquared-2.7*2.7);
+            if(discriminant>0&&-along-Math.Sqrt(discriminant)<delta.Length-.08)continue;
+            double score=Math.Pow(x-.5,2)+Math.Pow(y-.75,2);
+            if(score<bestScore){bestScore=score;bestYaw=candidateYaw;bestPitch=candidatePitch;}
+        }
+        Assert(double.IsFinite(bestScore),"Cannot frame the real ecology target in surface mode");
+        control.ResetView();control.SetZoom(1.08);control.RotateView(bestYaw,bestPitch);
+        var ecology=PlanetView3DScene.Build(2,"clear",false,42,placements);
+        var duck=FindPlacedMotion(ecology,placements.Single(p=>p.Kind=="duck"));
+        Assert(Angle(duck.Destination,PlotDirection(dominantTarget.PlotId))<1e-6,"The preview duck selected another pond instead of the framed target");
+        double seconds=((12-duck.Phase)%32+32)%32;control.AnimateScene(seconds);layout.UpdateLayout();
+        var bitmap=new RenderTargetBitmap(width,height,96,96,PixelFormats.Pbgra32);bitmap.Render(layout);
+        var encoder=new PngBitmapEncoder();encoder.Frames.Add(BitmapFrame.Create(bitmap));var absolute=Path.GetFullPath(path);Directory.CreateDirectory(Path.GetDirectoryName(absolute)!);using var stream=File.Create(absolute);encoder.Save(stream);
+        Console.WriteLine($"Synthetic ecology preview: {absolute}; {control.InteractionCount} actual habitat interactions; animated {control.LastAnimatedObjectCount}, culled {control.LastCulledObjectCount}; placements {string.Join(", ",placements.Select(p=>$"{p.Kind}@{p.PlotId}"))}");
+    }
     private static void CheckGroup(Model3DGroup group){foreach(var child in group.Children)if(child is GeometryModel3D g)CheckMesh((MeshGeometry3D)g.Geometry);else if(child is Model3DGroup nested)CheckGroup(nested);}
     private static int Triangles(Model3DGroup group)=>group.Children.Sum(m=>m is GeometryModel3D g?((MeshGeometry3D)g.Geometry).TriangleIndices.Count/3:m is Model3DGroup nested?Triangles(nested):0);
+    private static IEnumerable<GeometryModel3D> GeometryLeaves(Model3D model)
+    {
+        if(model is GeometryModel3D geometry)yield return geometry;
+        else if(model is Model3DGroup group)foreach(var child in group.Children)foreach(var leaf in GeometryLeaves(child))yield return leaf;
+    }
+    private static (int Triangles,int GeometryModels,int UniqueMeshes) SceneMetrics(PlanetScene scene)=>Metrics(GeometryLeaves(scene.Model).Concat(scene.Motions.SelectMany(m=>GeometryLeaves(m.Model))));
+    private static (int Triangles,int GeometryModels,int UniqueMeshes) Metrics(IEnumerable<GeometryModel3D> geometry)
+    {
+        var models=geometry.ToArray();return(models.Sum(model=>((MeshGeometry3D)model.Geometry).TriangleIndices.Count/3),models.Length,models.Select(model=>model.Geometry).Distinct(ReferenceEqualityComparer.Instance).Count());
+    }
+    private static Vector3D PlotDirection(int plot){var p=PlanetView3DScene.Plots[plot];return PlanetView3DGeometry.Direction(p.Latitude,p.Longitude);}
+    private static double Angle(Vector3D first,Vector3D second){first.Normalize();second.Normalize();return Math.Acos(Math.Clamp(Vector3D.DotProduct(first,second),-1,1));}
+    private static PlanetSceneMotion FindPlacedMotion(PlanetScene scene,PlanetBuildingPlacement placement)
+        =>scene.Motions.Single(m=>m.Kind=="creature"&&m.Species==placement.Kind&&Angle(m.Home,PlotDirection(placement.PlotId))<1e-6);
+    private static void CheckMotion(PlanetSceneMotion motion)
+    {
+        Assert(new[]{motion.Home.X,motion.Home.Y,motion.Home.Z,motion.Destination.X,motion.Destination.Y,motion.Destination.Z,motion.Radius,motion.Heading,motion.Phase}.All(double.IsFinite),"Motion contains non-finite state");
+        Assert(motion.Home.Length>0&&motion.Destination.Length>0&&motion.Radius>=2.69);
+    }
+    private static (int First,int Second)[] NearbyPlotPairs()
+        =>Enumerable.Range(0,PlanetLayoutCatalog.PlotCount).SelectMany(a=>Enumerable.Range(a+1,PlanetLayoutCatalog.PlotCount-a-1).Select(b=>(First:a,Second:b,Distance:Angle(PlotDirection(a),PlotDirection(b))))).Where(p=>p.Distance>.15&&p.Distance<.66).OrderBy(p=>p.Distance).Select(p=>(p.First,p.Second)).ToArray();
+    private static PlanetBuildingPlacement[] MaximumMovingLayout()
+    {
+        // Six species, two of each: 12 manually placed animals plus 20 real
+        // landscapes/buildings, all within the catalog's individual limits.
+        string[] kinds=["rabbit","rabbit","sheep","sheep","fox","fox","duck","duck","deer","deer","butterfly","butterfly","pond","pond","flower","flower","meadow","meadow","bush","bush","tree","tree","orchard","orchard","mushroom","mushroom","rockgarden","rockgarden","house","windmill","tower","observatory"];
+        return kinds.Select((kind,index)=>new PlanetBuildingPlacement("maximum-"+index,kind,index,index%4)).ToArray();
+    }
+    private static bool FullMatrixClose(Matrix3D a,Matrix3D b)=>MatrixClose(a,b)&&Math.Abs(a.OffsetX-b.OffsetX)<1e-9&&Math.Abs(a.OffsetY-b.OffsetY)<1e-9&&Math.Abs(a.OffsetZ-b.OffsetZ)<1e-9&&Math.Abs(a.M44-b.M44)<1e-9;
     private static void CheckMesh(MeshGeometry3D mesh){Assert(mesh.IsFrozen);Assert(mesh.Positions.Count==mesh.Normals.Count);Assert(mesh.Positions.All(p=>double.IsFinite(p.X)&&double.IsFinite(p.Y)&&double.IsFinite(p.Z)));for(int i=0;i<mesh.TriangleIndices.Count;i+=3){int a=mesh.TriangleIndices[i],b=mesh.TriangleIndices[i+1],c=mesh.TriangleIndices[i+2];var cross=Vector3D.CrossProduct(mesh.Positions[b]-mesh.Positions[a],mesh.Positions[c]-mesh.Positions[a]);Assert(cross.Length>1e-9&&Vector3D.DotProduct(cross,mesh.Normals[a])>0);}}
     private static string Signature(Model3DGroup group){var text=new System.Text.StringBuilder();void Walk(Model3D m){text.Append(m.Transform.Value.ToString(System.Globalization.CultureInfo.InvariantCulture));if(m is GeometryModel3D g)foreach(var p in ((MeshGeometry3D)g.Geometry).Positions)text.Append(p.ToString(System.Globalization.CultureInfo.InvariantCulture));else if(m is Model3DGroup inner)foreach(var c in inner.Children)Walk(c);}Walk(group);return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text.ToString())));}
     private static PlanetView3D ArrangedPlanet(Size size){var c=new PlanetView3D();Arrange(c,size);return c;}
     private static void Arrange(PlanetView3D control,Size size){control.Width=size.Width;control.Height=size.Height;control.Measure(size);control.Arrange(new Rect(new Point(),size));control.UpdateLayout();}
     private static T Field<T>(PlanetView3D control,string name)=>(T)typeof(PlanetView3D).GetField(name,System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.GetValue(control)!;
+    private static Window OffscreenHost(UIElement content)=>new() {Title="Synthetic planet animation test",Left=-20000,Top=-20000,Width=1100,Height=700,WindowStartupLocation=WindowStartupLocation.Manual,ShowActivated=false,ShowInTaskbar=false,Content=content};
+    private static void PumpUntil(Func<bool> condition,string failure)
+    {
+        if(condition())return;
+        var frame=new DispatcherFrame();var clock=System.Diagnostics.Stopwatch.StartNew();bool succeeded=false;
+        var probe=new DispatcherTimer {Interval=TimeSpan.FromMilliseconds(15)};
+        probe.Tick+=(_,_)=>{if(condition()){succeeded=true;frame.Continue=false;}else if(clock.Elapsed>TimeSpan.FromSeconds(3))frame.Continue=false;};
+        try{probe.Start();Dispatcher.PushFrame(frame);}finally{probe.Stop();}
+        Assert(succeeded,failure);
+    }
+    private static void PumpFor(TimeSpan duration)
+    {
+        var frame=new DispatcherFrame();var timer=new DispatcherTimer {Interval=duration};timer.Tick+=(_,_)=>frame.Continue=false;
+        try{timer.Start();Dispatcher.PushFrame(frame);}finally{timer.Stop();}
+    }
     private static Viewport3D Viewport(PlanetView3D control)=>Field<Viewport3D>(control,"viewport");
     private static ModelVisual3D Scene(PlanetView3D control)=>Field<ModelVisual3D>(control,"scene");
     private static Matrix3D Orientation(PlanetView3D control)=>Field<Transform3DGroup>(control,"planetTransform").Value;

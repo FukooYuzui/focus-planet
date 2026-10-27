@@ -2,7 +2,7 @@ param([string]$Destination = (Join-Path $PSScriptRoot 'artifacts/FocusPlanet-Win
 $ErrorActionPreference = 'Stop'
 $Destination = [System.IO.Path]::GetFullPath($Destination)
 $verificationArtifacts = Join-Path $PSScriptRoot 'artifacts/verification'
-foreach ($testProject in @('FocusGarden.Core.Tests', 'FocusGarden.Upgrade.Tests', 'FocusGarden.PlanetIntegration.Tests')) {
+foreach ($testProject in @('FocusGarden.Core.Tests', 'FocusGarden.Upgrade.Tests', 'FocusGarden.PlanetLayout.Tests', 'FocusGarden.PlanetGrowth.Tests', 'FocusGarden.PlanetGeometry.Tests', 'FocusGarden.PlanetView.Tests', 'FocusGarden.PlanetIntegration.Tests')) {
     dotnet build (Join-Path $PSScriptRoot "tests/$testProject/$testProject.csproj") -c Release --artifacts-path $verificationArtifacts --nologo
     if ($LASTEXITCODE -ne 0) { throw "数据保护检查构建失败，已停止发布：$testProject" }
     dotnet (Join-Path $verificationArtifacts "bin/$testProject/release/$testProject.dll")
