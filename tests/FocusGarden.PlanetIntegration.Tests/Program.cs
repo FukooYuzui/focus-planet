@@ -36,7 +36,7 @@ internal static class Program
                 var s = Field<PlanetSnapshot>(fresh, "planetSnapshot");
                 Assert(s.TotalGrowth == 0 && s.Level == 0);
                 Assert(Field<FrameworkElement>(fresh, "PlanetPage").Visibility == Visibility.Visible);
-                Assert(fresh.Title.Contains("专注星球 0.5"));
+                Assert(fresh.Title.Contains("专注星球 0.6"));
             });
             Run("new focus feeds planet once and page navigation preserves timer setup", () =>
             {
@@ -115,13 +115,21 @@ internal static class Program
             {
                 var host = Field<ContentControl>(mature, "PlanetSceneHost"); var original = host.Content;
                 var card = Field<Border>(mature, "PlanetLayoutCard"); var parent = card.Parent;
+                var liveView=Field<object>(mature,"planetView");
+                void SetSurface(bool enabled)=>liveView.GetType().GetMethod("SetSurfaceView")!.Invoke(liveView,new object[]{enabled});
+                bool IsSurface()=>(bool)liveView.GetType().GetProperty("IsSurfaceView",Flags)!.GetValue(liveView)!;
+                double CurrentZoom()=>(double)liveView.GetType().GetProperty("Zoom",Flags)!.GetValue(liveView)!;
+                SetSurface(true);Call(liveView,"SetZoom",.94);
                 foreach (bool edit in new[] { false, true })
                 {
                     var expanded = (Window)mature.GetType().GetMethod("CreatePlanetWorkspace", Flags)!.Invoke(mature, new object[] { edit })!;
                     Assert(host.Content == null && !expanded.IsVisible);
                     if (args.Length == 2 && args[0] == "--render") Render(expanded, Path.Combine(args[1], edit ? "专注星球-展开布置演示.png" : "专注星球-展开观景演示.png"), 1480, 960);
                     expanded.Close(); Assert(ReferenceEquals(host.Content, original) && ReferenceEquals(card.Parent, parent));
+                    Assert(IsSurface() && Math.Abs(CurrentZoom()-.94)<1e-9);
                 }
+                Call(mature,"Page","focus");Call(mature,"Page","planet");Assert(IsSurface());
+                SetSurface(false);
             });
             Run("failed growth commit prevents travel and later retry credits original planet", () =>
             {
