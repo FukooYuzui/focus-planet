@@ -44,6 +44,54 @@ Run("settings survive reopening and normalize without executing input", () =>
     Equal("notepad", settings.BlockedApps.Single()); Equal("bilibili.com", settings.BlockedDomains.Single());
 });
 
+Run("strict-focus choice survives reopening and can be disabled for the next session", () =>
+{
+    var db = Path.Combine(basePath, "strict-settings.db");
+    using (var store = new FocusStore(db))
+    {
+        Equal(false, store.LoadSettings().StrictFocus);
+        store.SaveSettings(new FocusSettings { FocusMinutes = 35, StrictFocus = true });
+    }
+    using (var reopened = new FocusStore(db))
+    {
+        Equal(true, reopened.LoadSettings().StrictFocus);
+        Equal(35, reopened.LoadSettings().FocusMinutes);
+        var saved = reopened.LoadSettings(); saved.StrictFocus = false;
+        reopened.SaveSettings(saved);
+    }
+    using var final = new FocusStore(db);
+    Equal(false, final.LoadSettings().StrictFocus);
+    Equal(35, final.LoadSettings().FocusMinutes);
+});
+
+Run("legacy settings without strict-focus stay optional and preserve saved seconds", () =>
+{
+    var db = Path.Combine(basePath, "legacy-settings.db");
+    long id;
+    using (var store = new FocusStore(db))
+    {
+        var start = Local(2026, 10, 27, 9);
+        id = store.BeginSession("legacy focus", 60, start);
+        store.AddProgress(id, 17, start.AddSeconds(17));
+        store.EndSession(id, "emergency", start.AddSeconds(17));
+    }
+    using (var connection = new SqliteConnection("Data Source=" + db))
+    {
+        connection.Open(); using var command = connection.CreateCommand();
+        command.CommandText = "INSERT INTO settings(id,json) VALUES(1,$json)";
+        command.Parameters.AddWithValue("$json", "{\"FocusMinutes\":40,\"BreakMinutes\":8,\"Immersive\":false,\"BlockedApps\":[],\"BlockedDomains\":[]}");
+        command.ExecuteNonQuery();
+    }
+    using var reopened = new FocusStore(db);
+    var old = reopened.LoadSettings();
+    Equal(false, old.StrictFocus); Equal(40, old.FocusMinutes); Equal(false, old.Immersive);
+    old.StrictFocus = true; reopened.SaveSettings(old);
+    Equal(true, reopened.LoadSettings().StrictFocus);
+    Equal(id, reopened.GetSessions().Single().Id);
+    Equal(17, reopened.GetSessions().Single().ElapsedSeconds);
+    Equal(17, reopened.GetDailyTotals(2026).Values.Sum());
+});
+
 Run("normal completion persists exactly planned duration", () =>
 {
     var db = Path.Combine(basePath, "completed.db");

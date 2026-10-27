@@ -22,6 +22,8 @@ public partial class MainWindow : Window
     private FocusClock? clock;
     private long? sessionId;
     private bool breaking, confirming, shuttingDown, hotkeyRegistered;
+    private bool activeStrictFocus, startingFocus;
+    private Func<int, bool> strictStartConfirmation;
     private long lastTimestamp;
     private int plannedSeconds, year = DateTime.Now.Year;
     private ImmersionWindow? immersion;
@@ -32,6 +34,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        strictStartConfirmation = ConfirmStrictStart;
         Title=$"专注星球 {App.CurrentVersion} · Focus Planet";
         var workArea = SystemParameters.WorkArea;
         MinWidth = Math.Min(MinWidth, workArea.Width); MinHeight = Math.Min(MinHeight, workArea.Height);
@@ -51,7 +54,7 @@ public partial class MainWindow : Window
             hwndSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
             hwndSource.AddHook(WindowHook);
             hotkeyRegistered = NativeFocus.RegisterHotKey(hwndSource.Handle, 9081, 0x4003, 0x1B);
-            if (!hotkeyRegistered) HotkeyHint.Text = "快捷键被占用；请使用可见的紧急退出按钮。";
+            RefreshExitHint();
         };
         SystemEvents.PowerModeChanged += PowerChanged;
         SystemEvents.SessionSwitch += SessionChanged;
@@ -63,12 +66,17 @@ public partial class MainWindow : Window
     }
     private nint WindowHook(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
     {
-        if (msg == 0x0312 && wParam == 9081) { Finish("emergency", "已紧急退出，应用限制已解除。"); handled = true; }
+        if (msg == 0x0312 && wParam == 9081)
+        {
+            if (CanRequestEarlyExit()) Finish("emergency", "已紧急退出，应用限制已解除。");
+            handled = true;
+        }
         return 0;
     }
     private void LoadSettingsUi()
     {
         FocusMinutesInput.Text = settings.FocusMinutes.ToString(); BreakMinutesInput.Text = settings.BreakMinutes.ToString(); ImmersiveCheck.IsChecked = settings.Immersive;
+        StrictFocusCheck.IsChecked = settings.StrictFocus;
         AppsInput.Text = string.Join(Environment.NewLine, settings.BlockedApps); DomainsInput.Text = string.Join(Environment.NewLine, settings.BlockedDomains);
         TimerText.Text = FormatTime(settings.FocusMinutes * 60);
     }
@@ -79,7 +87,7 @@ public partial class MainWindow : Window
         StatsPage.Visibility = page == "stats" ? Visibility.Visible : Visibility.Collapsed;
         RulesPage.Visibility = page == "rules" ? Visibility.Visible : Visibility.Collapsed;
         PageTitle.Text = page switch { "planet" => "把每一份投入，变成一个小世界。", "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
-        PageSubtitle.Text = page switch { "planet" => "六个月的陪伴，从一颗荒凉星球出发。", "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；紧急退出始终可用。", _ => "选一件小事，开始一段完整的专注。" };
+        PageSubtitle.Text = page switch { "planet" => "六个月的陪伴，从一颗荒凉星球出发。", "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；严格专注期间不能在程序内提前解除。", _ => "选一件小事，开始一段完整的专注。" };
         PageScroller.ScrollToTop();
     }
     private void ShowFocus(object sender, RoutedEventArgs e) { RefreshStatistics(); Page("focus"); }
@@ -129,7 +137,7 @@ public partial class MainWindow : Window
             if (!int.TryParse(BreakMinutesInput.Text, out var rest) || rest < 1 || rest > 60) throw new ArgumentException("休息时长请输入 1–60 分钟。");
             var apps = Lines(AppsInput.Text).Select(AppRules.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (apps.Any(n => NativeFocus.Protected.Contains(n))) throw new ArgumentException("不能限制系统桌面、任务管理器或专注星球等逃生应用。");
-            var candidate = new FocusSettings { FocusMinutes = focus, BreakMinutes = rest, Immersive = ImmersiveCheck.IsChecked == true, BlockedApps = apps, BlockedDomains = Lines(DomainsInput.Text).Select(DomainRules.Normalize).Distinct().ToArray() };
+            var candidate = new FocusSettings { FocusMinutes = focus, BreakMinutes = rest, Immersive = ImmersiveCheck.IsChecked == true, StrictFocus = StrictFocusCheck.IsChecked == true, BlockedApps = apps, BlockedDomains = Lines(DomainsInput.Text).Select(DomainRules.Normalize).Distinct().ToArray() };
             store.SaveSettings(candidate); settings = candidate;
             AppsInput.Text = string.Join(Environment.NewLine, settings.BlockedApps); DomainsInput.Text = string.Join(Environment.NewLine, settings.BlockedDomains);
             return true;
@@ -145,22 +153,43 @@ public partial class MainWindow : Window
     private void StartTest(object sender, RoutedEventArgs e) { if (App.TestMode) Begin(true); }
     private void Begin(bool shortTest)
     {
-        if (clock != null || !SaveAllSettings()) return;
-        plannedSeconds = shortTest ? 10 : settings.FocusMinutes * 60;
-        currentTask = string.IsNullOrWhiteSpace(TaskInput.Text) ? "一段专注时间" : TaskInput.Text.Trim();
-        try { store.RecoverInterrupted(DateTimeOffset.Now); sessionId = store.BeginSession(currentTask, plannedSeconds, DateTimeOffset.Now); }
-        catch (Exception ex) { Status("无法保存记录，未开启限制：" + ex.Message); return; }
-        clock = new FocusClock(plannedSeconds); breaking = false; lastTimestamp = Stopwatch.GetTimestamp(); nextHeatmapRefresh = 30;
-        SessionLabel.Text = shortTest ? "10 秒验收 · 使用独立测试记录" : "正在专注 · 一次只做一件事";
-        SetActiveUi(true); UpdateTimer(); RefreshStatistics(); Page("focus");
-        bridge.Publish(true, settings.BlockedDomains, clock.RemainingSeconds);
-        Status(settings.BlockedDomains.Length > 0 ? "专注已开始；网站限制需要已连接的浏览器扩展。" : hotkeyRegistered ? "专注已开始；Ctrl + Alt + Esc 可立即退出。" : "专注已开始；紧急退出按钮始终可用（快捷键被占用）。");
-        if (settings.Immersive) EnterFullscreen();
+        if (clock != null || startingFocus) return;
+        startingFocus = true;
+        try
+        {
+            if (!SaveAllSettings()) return;
+            plannedSeconds = shortTest ? 10 : settings.FocusMinutes * 60;
+            // Capture the choice once: a session cannot unlock itself through later settings changes.
+            var strictForSession = settings.StrictFocus;
+            if (strictForSession && !strictStartConfirmation(plannedSeconds))
+            {
+                Status("已取消开始严格专注，尚未创建本轮记录或开启限制。");
+                return;
+            }
+            currentTask = string.IsNullOrWhiteSpace(TaskInput.Text) ? "一段专注时间" : TaskInput.Text.Trim();
+            try { store.RecoverInterrupted(DateTimeOffset.Now); sessionId = store.BeginSession(currentTask, plannedSeconds, DateTimeOffset.Now); }
+            catch (Exception ex) { Status("无法保存记录，未开启限制：" + ex.Message); return; }
+            clock = new FocusClock(plannedSeconds); breaking = false; activeStrictFocus = strictForSession;
+            lastTimestamp = Stopwatch.GetTimestamp(); nextHeatmapRefresh = 30;
+            SessionLabel.Text = activeStrictFocus ? "严格专注中 · 倒计时结束后恢复退出" : shortTest ? "10 秒验收 · 使用独立测试记录" : "正在专注 · 一次只做一件事";
+            SetActiveUi(true); UpdateTimer(); RefreshStatistics(); Page("focus");
+            bridge.Publish(true, settings.BlockedDomains, clock.RemainingSeconds);
+            Status(activeStrictFocus ? "严格专注已开始；本轮程序内提前退出已禁用，计时结束后恢复。" : settings.BlockedDomains.Length > 0 ? "专注已开始；网站限制需要已连接的浏览器扩展。" : hotkeyRegistered ? "专注已开始；Ctrl + Alt + Esc 可立即退出。" : "专注已开始；可使用紧急退出按钮（快捷键被占用）。");
+            if (settings.Immersive) EnterFullscreen();
+        }
+        finally { startingFocus = false; }
+    }
+    private bool ConfirmStrictStart(int seconds)
+    {
+        var duration = seconds % 60 == 0 ? $"{seconds / 60} 分钟" : $"{seconds} 秒";
+        return MessageBox.Show(this,
+            $"本轮将专注 {duration}。\n\n开始后，紧急退出按钮、Esc、Ctrl + Alt + Esc 和关闭窗口均不能提前结束，设置也不能中途修改。倒计时结束后自动恢复。\n\nWindows 任务管理器、注销和关机仍可使用；锁屏、休眠或异常时会中断并保留已保存的时长。\n\n现在开始严格专注？",
+            "确认开始严格专注", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes;
     }
     private void StartBreak(object sender, RoutedEventArgs e)
     {
-        if (clock != null || !SaveAllSettings()) return;
-        plannedSeconds = settings.BreakMinutes * 60; breaking = true; clock = new FocusClock(plannedSeconds); lastTimestamp = Stopwatch.GetTimestamp();
+        if (clock != null || startingFocus || !SaveAllSettings()) return;
+        plannedSeconds = settings.BreakMinutes * 60; breaking = true; activeStrictFocus = false; clock = new FocusClock(plannedSeconds); lastTimestamp = Stopwatch.GetTimestamp();
         SessionLabel.Text = "休息时间 · 起身走动，看看远处";
         SetActiveUi(true); FullscreenButton.Visibility = Visibility.Collapsed; UpdateTimer(); Status("休息不计入专注记录，也不启用使用限制。");
     }
@@ -170,10 +199,24 @@ public partial class MainWindow : Window
         BreakButton.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
         TestButton.Visibility = App.TestMode && !active ? Visibility.Visible : Visibility.Collapsed;
         EmergencyButton.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
-        EmergencyButton.Content = breaking ? "结束休息" : "紧急退出";
+        EmergencyButton.IsEnabled = !IsStrictFocusActive;
+        EmergencyButton.Content = IsStrictFocusActive ? "提前退出已禁用" : breaking ? "结束休息" : "紧急退出";
         FullscreenButton.Visibility = active && !breaking ? Visibility.Visible : Visibility.Collapsed;
         SetupPanel.IsEnabled = !active; TaskInput.IsEnabled = !active; AppsInput.IsEnabled = !active; DomainsInput.IsEnabled = !active;
         ChooseBackgroundButton.IsEnabled = !active; ResetBackgroundButton.IsEnabled = !active && appearance.BackgroundImage != null;
+        RefreshExitHint();
+    }
+    private bool IsStrictFocusActive => clock != null && !breaking && activeStrictFocus;
+    private void RefreshExitHint() => HotkeyHint.Text = IsStrictFocusActive
+        ? "本轮严格专注 · 程序内提前退出已禁用，倒计时结束后恢复。"
+        : hotkeyRegistered ? "紧急快捷键：Ctrl + Alt + Esc（普通专注与休息时可用）"
+        : "快捷键不可用；普通专注可使用紧急退出按钮，休息可随时结束。";
+    private bool CanRequestEarlyExit()
+    {
+        if (clock == null) return false;
+        if (!IsStrictFocusActive) return true;
+        Status("本轮为严格专注，不能在程序内提前退出；倒计时结束后恢复。");
+        return false;
     }
     private void Tick(object? sender, EventArgs e)
     {
@@ -197,7 +240,7 @@ public partial class MainWindow : Window
         {
             bridge.Publish(true, settings.BlockedDomains, clock.RemainingSeconds);
             var blocked = NativeFocus.BlockForeground(settings.BlockedApps);
-            if (blocked != null) { Status("已拦截 " + blocked + "，进程和文件仍保留。紧急退出可解除。"); if (immersion == null) { WindowState = WindowState.Normal; Activate(); } }
+            if (blocked != null) { Status("已拦截 " + blocked + (IsStrictFocusActive ? "，进程和文件仍保留；严格专注计时结束后解除。" : "，进程和文件仍保留。紧急退出可解除。")); if (immersion == null) { WindowState = WindowState.Normal; Activate(); } }
         }
     }
     private void UpdateTimer()
@@ -212,13 +255,13 @@ public partial class MainWindow : Window
     private void EnterFullscreen()
     {
         if (clock == null || breaking || immersion != null) return;
-        immersion = new ImmersionWindow(currentTask, hotkeyRegistered, appearance.BackgroundImage, ConfirmEmergency) { Owner = this };
+        immersion = new ImmersionWindow(currentTask, hotkeyRegistered, appearance.BackgroundImage, ConfirmEmergency, IsStrictFocusActive) { Owner = this };
         immersion.UpdateTime(FormatTime(clock.RemainingSeconds)); immersion.Show();
     }
     private void EmergencyClick(object sender, RoutedEventArgs e) => ConfirmEmergency();
     private void ConfirmEmergency()
     {
-        if (clock == null || confirming) return;
+        if (confirming || !CanRequestEarlyExit()) return;
         if (breaking) { Finish("emergency", "休息已结束。"); return; }
         confirming = true;
         try
@@ -232,7 +275,7 @@ public partial class MainWindow : Window
     {
         if (clock == null) return;
         var id = sessionId;
-        clock = null; sessionId = null; breaking = false;
+        clock = null; sessionId = null; breaking = false; activeStrictFocus = false;
         bridge.Publish(false, [], 0);
         immersion?.Release(); immersion = null; SetActiveUi(false);
         if (id.HasValue)
@@ -247,7 +290,7 @@ public partial class MainWindow : Window
     public void ReleaseForError()
     {
         var id = sessionId;
-        clock = null; sessionId = null; breaking = false;
+        clock = null; sessionId = null; breaking = false; activeStrictFocus = false;
         bridge.Publish(false, [], 0); immersion?.Release(); immersion = null; SetActiveUi(false);
         if (id.HasValue) { try { store.EndSession(id.Value, "interrupted", DateTimeOffset.Now); } catch { /* Next start recovers the last durable checkpoint. */ } }
     }

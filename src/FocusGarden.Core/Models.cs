@@ -5,6 +5,7 @@ public sealed class FocusSettings
     public int FocusMinutes { get; set; } = 25;
     public int BreakMinutes { get; set; } = 5;
     public bool Immersive { get; set; } = true;
+    public bool StrictFocus { get; set; }
     public string[] BlockedApps { get; set; } = [];
     public string[] BlockedDomains { get; set; } = [];
 }

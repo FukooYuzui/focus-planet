@@ -282,6 +282,7 @@ public sealed class FocusStore : IDisposable
             FocusMinutes = settings.FocusMinutes,
             BreakMinutes = settings.BreakMinutes,
             Immersive = settings.Immersive,
+            StrictFocus = settings.StrictFocus,
             BlockedApps = settings.BlockedApps.Where(x => !string.IsNullOrWhiteSpace(x)).Select(AppRules.Normalize).Distinct().ToArray(),
             BlockedDomains = settings.BlockedDomains.Where(x => !string.IsNullOrWhiteSpace(x)).Select(DomainRules.Normalize).Distinct().ToArray()
         };
