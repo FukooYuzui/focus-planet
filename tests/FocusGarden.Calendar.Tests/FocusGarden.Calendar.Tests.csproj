@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWPF>true</UseWPF><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+  <ItemGroup><Compile Include="../../src/FocusGarden.App/TokenCalendar3D.cs" Link="TokenCalendar3D.cs"/><Compile Include="../../src/FocusGarden.App/TokenCalendar3DGeometry.cs" Link="TokenCalendar3DGeometry.cs"/></ItemGroup>
+</Project>

@@ -55,8 +55,9 @@ public partial class MainWindow : Window
         SystemEvents.PowerModeChanged += PowerChanged;
         SystemEvents.SessionSwitch += SessionChanged;
         Closing += ClosingWindow;
-        Closed += (_, _) => { shuttingDown = true; timer.Stop(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); bridge.Dispose(); store.Dispose(); };
+        Closed += (_, _) => { shuttingDown = true; timer.Stop(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); CloseDashboard(); bridge.Dispose(); store.Dispose(); };
         RefreshStatistics();
+        InitializeDashboard();
     }
     private nint WindowHook(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
     {
@@ -86,7 +87,11 @@ public partial class MainWindow : Window
         var now = DateTime.Now;
         CurrentTimeText.Text = "现在  " + now.ToString("HH:mm:ss");
         CurrentDateText.Text = now.ToString("yyyy 年 M 月 d 日  dddd", CultureInfo.GetCultureInfo("zh-CN"));
-        if (now.Date != displayedDate) { displayedDate = now.Date; RefreshStatistics(); }
+        if (now.Date != displayedDate)
+        {
+            var previousDay = displayedDate; displayedDate = now.Date; RefreshStatistics();
+            if (dashboardReady) { if (usageDate == previousDay) usageDate = now.Date; RefreshUsageUi(); if (!importingTokens) RefreshTokenUi(); }
+        }
     }
     private void ApplyAppearance()
     {
@@ -169,6 +174,7 @@ public partial class MainWindow : Window
     private void Tick(object? sender, EventArgs e)
     {
         UpdateWallClock();
+        DashboardTick();
         ApiStatus.Text = bridge.Error != null ? "本机连接服务不可用：" + bridge.Error : DateTimeOffset.UtcNow - bridge.LastContact < TimeSpan.FromSeconds(20) ? "● 浏览器扩展已连接（仅代表通信成功）" : "○ 等待扩展连接 · 本机服务已就绪";
         if (clock == null) return;
         var now = Stopwatch.GetTimestamp(); var delta = Stopwatch.GetElapsedTime(lastTimestamp, now).TotalSeconds; lastTimestamp = now;
@@ -194,7 +200,7 @@ public partial class MainWindow : Window
         if (clock == null) return;
         TimerText.Text = FormatTime(clock.RemainingSeconds); TimerProgress.Value = (double)clock.ElapsedSeconds / plannedSeconds;
         immersion?.UpdateTime(TimerText.Text);
-        Title = $"{TimerText.Text} · 专注花园 0.2" + (App.TestMode ? " [独立验收模式]" : "");
+        Title = $"{TimerText.Text} · 专注花园 0.3" + (App.TestMode ? " [独立验收模式]" : "");
     }
     private static string FormatTime(int seconds) => $"{seconds / 60:00}:{seconds % 60:00}";
     private void EnterFullscreenClick(object sender, RoutedEventArgs e) => EnterFullscreen();
@@ -229,7 +235,7 @@ public partial class MainWindow : Window
             try { store.EndSession(id.Value, status, DateTimeOffset.Now); }
             catch (Exception ex) { message += " 记录结束状态保存失败，下次启动将恢复为中断：" + ex.Message; }
         }
-        Title = "专注花园 0.2 · Focus Garden" + (App.TestMode ? " [独立验收模式]" : "");
+        Title = "专注花园 0.3 · Focus Garden" + (App.TestMode ? " [独立验收模式]" : "");
         SessionLabel.Text = status == "completed" ? "完成一段，让专注慢慢生长。" : "下一次，继续从这里开始。";
         Status(message); RefreshStatistics(); Activate();
     }
@@ -240,8 +246,22 @@ public partial class MainWindow : Window
         bridge.Publish(false, [], 0); immersion?.Release(); immersion = null; SetActiveUi(false);
         if (id.HasValue) { try { store.EndSession(id.Value, "interrupted", DateTimeOffset.Now); } catch { /* Next start recovers the last durable checkpoint. */ } }
     }
-    private void PowerChanged(object sender, PowerModeChangedEventArgs e) { if (e.Mode == PowerModes.Suspend) Dispatcher.BeginInvoke(() => Finish("interrupted", "电脑进入休眠，本轮已中断并解除限制。")); }
-    private void SessionChanged(object sender, SessionSwitchEventArgs e) { if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff) Dispatcher.BeginInvoke(() => Finish("interrupted", "系统锁定或注销，本轮已中断。")); }
+    private void PowerChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (e.Mode == PowerModes.Suspend) { powerSuspended = true; if (dashboardReady) usageTracker.IsSessionLocked = true; Finish("interrupted", "电脑进入休眠，本轮已中断并解除限制。"); }
+            else if (e.Mode == PowerModes.Resume) { powerSuspended = false; if (dashboardReady) usageTracker.IsSessionLocked = desktopLocked; }
+        });
+    }
+    private void SessionChanged(object sender, SessionSwitchEventArgs e)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff) { desktopLocked = true; if (dashboardReady) usageTracker.IsSessionLocked = true; Finish("interrupted", "系统锁定或注销，本轮已中断。"); }
+            else if (e.Reason is SessionSwitchReason.SessionUnlock or SessionSwitchReason.SessionLogon) { desktopLocked = false; if (dashboardReady) usageTracker.IsSessionLocked = powerSuspended; }
+        });
+    }
     private void ClosingWindow(object? sender, System.ComponentModel.CancelEventArgs e)
     {
         if (clock != null && !shuttingDown) { e.Cancel = true; ConfirmEmergency(); }

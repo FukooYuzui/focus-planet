@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><AssemblyName>FocusGarden</AssemblyName>
-    <Version>0.2.0</Version><ApplicationManifest>app.manifest</ApplicationManifest><RuntimeFrameworkVersion>8.0.22</RuntimeFrameworkVersion>
+    <Version>0.3.0</Version><ApplicationManifest>app.manifest</ApplicationManifest><RuntimeFrameworkVersion>8.0.22</RuntimeFrameworkVersion>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../FocusGarden.Core/FocusGarden.Core.csproj"/><ProjectReference Include="../FocusGarden.Timing/FocusGarden.Timing.csproj"/></ItemGroup>
 </Project>
