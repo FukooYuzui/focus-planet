@@ -192,11 +192,107 @@ internal static class Program
                 f.AssertReleased("interrupted", seconds, days); f.AssertHistory();
             });
 
-            Run("a long timing gap interrupts strict focus without crediting the gap", () =>
+            foreach (var strict in new[] { false, true })
+                Run((strict ? "strict" : "ordinary") + " focus survives UI gaps past one and two minutes without leaving immersion or crediting gaps", () =>
+                {
+                    using var f = new Fixture(strict);
+                    Field<TextBox>(f.Window, "FocusMinutesInput").Text = "3";
+                    f.Start();
+                    var session = Field<long?>(f.Window, "sessionId");
+                    var timer = Field<object>(f.Window, "clock");
+                    var immersive = CreateImmersion(strict, () => throw new Exception("Unexpected emergency callback during gap recovery."));
+                    SetField(f.Window, "immersion", immersive);
+                    bool closed = false; immersive.Closed += (_, _) => closed = true;
+
+                    void AssertStillRunning()
+                    {
+                        Equal("running", f.Current.Status);
+                        Equal(session, Field<long?>(f.Window, "sessionId"));
+                        Assert(ReferenceEquals(timer, Field<object>(f.Window, "clock")));
+                        Assert(ReferenceEquals(immersive, Field<object>(f.Window, "immersion")));
+                        Assert(!closed && f.Bridge.active);
+                        Equal(strict, Field<bool>(f.Window, "activeStrictFocus"));
+                        Assert(!Field<FrameworkElement>(f.Window, "SetupPanel").IsEnabled);
+                        Equal(!strict, Field<Button>(f.Window, "EmergencyButton").IsEnabled);
+                        f.AssertHistory();
+                    }
+                    void SkipGap(double seconds)
+                    {
+                        var rows = f.AllRows(); var elapsed = f.Current.ElapsedSeconds; var daySeconds = f.CurrentDaySeconds();
+                        f.Tick(seconds);
+                        Equal(rows, f.AllRows()); Equal(elapsed, f.Current.ElapsedSeconds); Equal(daySeconds, f.CurrentDaySeconds());
+                        AssertStillRunning();
+                    }
+
+                    for (var i = 0; i < 30 && f.Current.ElapsedSeconds < 60; i++) f.Tick(3.05);
+                    Assert(f.Current.ElapsedSeconds >= 60 && f.Current.ElapsedSeconds < 65);
+                    SkipGap(6.1);
+                    var afterFirstGap = f.Current.ElapsedSeconds;
+                    f.Tick(1.1); Assert(f.Current.ElapsedSeconds > afterFirstGap); AssertStillRunning();
+
+                    for (var i = 0; i < 30 && f.Current.ElapsedSeconds < 120; i++) f.Tick(3.05);
+                    Assert(f.Current.ElapsedSeconds >= 120 && f.Current.ElapsedSeconds < 125);
+                    SkipGap(12);
+                    SkipGap(7200);
+                    for (var i = 0; i < 30 && Field<object?>(f.Window, "clock") is not null; i++) f.Tick(3.05);
+
+                    f.AssertReleased("completed", 180, 180);
+                    Assert(closed); Assert(Field<object?>(f.Window, "immersion") is null);
+                    Equal(2, f.Store.GetSessions().Count);
+                    var completedRows = f.AllRows(); f.Tick(1.1); Equal(completedRows, f.AllRows());
+                    f.AssertHistory();
+                });
+
+            Run("a real growth database writer lock cannot end minute-one focus and later growth settles once", () =>
             {
-                using var f = new Fixture(); f.Start(); f.Tick(2.1);
-                var seconds = f.Current.ElapsedSeconds; var days = f.CurrentDaySeconds();
-                f.Tick(12); f.AssertReleased("interrupted", seconds, days); f.AssertHistory();
+                using var f = new Fixture();
+                Field<TextBox>(f.Window, "FocusMinutesInput").Text = "3";
+                f.Start();
+                var session = Field<long?>(f.Window, "sessionId");
+                var timer = Field<object>(f.Window, "clock");
+                var immersive = CreateImmersion(true, () => throw new Exception("Growth contention requested an emergency exit."));
+                SetField(f.Window, "immersion", immersive);
+                bool closed = false; immersive.Closed += (_, _) => closed = true;
+                for (var i = 0; i < 80 && f.Current.ElapsedSeconds < 58; i++) f.Tick(1.01);
+                Assert(f.Current.ElapsedSeconds >= 58 && f.Current.ElapsedSeconds < 60);
+                Assert((bool)Call(f.Window, "RefreshPlanet")!);
+                var beforeGrowth = Field<PlanetSnapshot>(f.Window, "planetSnapshot").TotalGrowth;
+                Equal(0L, beforeGrowth);
+
+                using var blocker = new SqliteConnection(new SqliteConnectionStringBuilder
+                {
+                    DataSource = Path.Combine(f.DirectoryPath, "planet.db"), Pooling = false, DefaultTimeout = 1
+                }.ToString());
+                blocker.Open();
+                using var command = blocker.CreateCommand(); command.CommandText = "BEGIN IMMEDIATE"; command.ExecuteNonQuery();
+                var watch = new Stopwatch();
+                try
+                {
+                    SetField(f.Window, "planetTick", Stopwatch.GetTimestamp() - Stopwatch.Frequency * 6);
+                    watch.Start(); f.Tick(3.05); watch.Stop();
+                    Assert(watch.Elapsed < TimeSpan.FromSeconds(5));
+                    Equal("running", f.Current.Status); Equal(session, Field<long?>(f.Window, "sessionId"));
+                    Assert(ReferenceEquals(timer, Field<object>(f.Window, "clock")));
+                    Assert(ReferenceEquals(immersive, Field<object>(f.Window, "immersion")));
+                    Assert(!closed && f.Bridge.active && Field<bool>(f.Window, "activeStrictFocus"));
+                    Assert(f.Current.ElapsedSeconds >= 60 && f.Current.ElapsedSeconds < 65);
+                    Equal((long)f.Current.ElapsedSeconds, f.CurrentDaySeconds());
+                    Equal(beforeGrowth, Field<PlanetSnapshot>(f.Window, "planetSnapshot").TotalGrowth);
+                    f.AssertHistory();
+                }
+                finally { command.CommandText = "ROLLBACK"; command.ExecuteNonQuery(); }
+
+                var focusRows = f.AllRows();
+                Assert((bool)Call(f.Window, "RefreshPlanet")!);
+                Equal(1L, Field<PlanetSnapshot>(f.Window, "planetSnapshot").TotalGrowth);
+                for (var i = 0; i < 3; i++) Assert((bool)Call(f.Window, "RefreshPlanet")!);
+                Equal(1L, Field<PlanetSnapshot>(f.Window, "planetSnapshot").TotalGrowth);
+                Equal(focusRows, f.AllRows());
+                var beforeResume = f.Current.ElapsedSeconds; f.Tick(1.1);
+                Assert(f.Current.ElapsedSeconds > beforeResume);
+                Equal("running", f.Current.Status); Assert(!closed && f.Bridge.active);
+                Assert(Field<bool>(f.Window, "activeStrictFocus")); f.AssertHistory();
+                Console.WriteLine($"Growth writer contention returned after {watch.Elapsed.TotalMilliseconds:0} ms; historical focus rows unchanged.");
             });
 
             Run("simulated suspend releases strict focus while keeping saved progress", () =>

@@ -2,7 +2,7 @@ namespace FocusGarden.Timing;
 
 /// <summary>
 /// Counts only supplied monotonic intervals. The caller owns its Stopwatch and
-/// must end the session when GapDetected becomes true.
+/// must either end the session or explicitly acknowledge a rejected interval.
 /// </summary>
 public sealed class FocusClock
 {
@@ -26,7 +26,7 @@ public sealed class FocusClock
     /// <summary>
     /// Returns newly credited whole seconds. An interval greater than five
     /// seconds latches a gap without crediting any part of that interval.
-    /// Subsequent intervals cannot resume this instance.
+    /// Subsequent intervals cannot resume until the caller explicitly acknowledges the gap.
     /// </summary>
     public int Advance(double monotonicSecondsDelta)
     {
@@ -55,4 +55,11 @@ public sealed class FocusClock
             : (int)Math.Floor(_accumulatedSeconds);
         return ElapsedSeconds - previous;
     }
+
+    /// <summary>
+    /// Continues the same session after an ambiguous callback delay. No part of
+    /// the rejected interval is credited; saved progress and its fractional
+    /// remainder are preserved. Confirmed system suspension is handled by the caller.
+    /// </summary>
+    public void ContinueAfterGap() => GapDetected = false;
 }

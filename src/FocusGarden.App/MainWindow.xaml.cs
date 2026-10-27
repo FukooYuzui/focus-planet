@@ -221,13 +221,23 @@ public partial class MainWindow : Window
     private void Tick(object? sender, EventArgs e)
     {
         UpdateWallClock();
+        // Save focus progress before optional statistics and scene work. A slow UI
+        // refresh is not evidence that the user ended or suspended this session.
+        AdvanceFocus();
         DashboardTick();
         PlanetTick();
         ApiStatus.Text = bridge.Error != null ? "本机连接服务不可用：" + bridge.Error : DateTimeOffset.UtcNow - bridge.LastContact < TimeSpan.FromSeconds(20) ? "● 浏览器扩展已连接（仅代表通信成功）" : "○ 等待扩展连接 · 本机服务已就绪";
+    }
+    private void AdvanceFocus()
+    {
         if (clock == null) return;
         var now = Stopwatch.GetTimestamp(); var delta = Stopwatch.GetElapsedTime(lastTimestamp, now).TotalSeconds; lastTimestamp = now;
         var progress = clock.Advance(delta);
-        if (clock.GapDetected) { Finish("interrupted", "检测到休眠或长时间停顿，本轮已中断；停顿时间未计入。"); return; }
+        if (clock.GapDetected)
+        {
+            clock.ContinueAfterGap();
+            Status("检测到界面延迟，本轮继续；这段停顿未计入专注时长。");
+        }
         if (progress > 0 && sessionId.HasValue)
         {
             try { store.AddProgress(sessionId.Value, progress, DateTimeOffset.Now); }

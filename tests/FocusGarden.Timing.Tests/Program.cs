@@ -40,7 +40,7 @@ var tests = new (string Name, Action Run)[]
         Equal(0, clock.RemainingSeconds);
         Equal(false, clock.GapDetected);
     }),
-    ("gap rejects entire interval and cannot resume", () =>
+    ("gap rejects entire interval and stays latched until explicitly acknowledged", () =>
     {
         var clock = new FocusClock(100);
         Equal(2, clock.Advance(2.5));
@@ -62,6 +62,73 @@ var tests = new (string Name, Action Run)[]
         Equal(true, clock.GapDetected);
         for (int index = 0; index < 100; index++) Equal(0, clock.Advance(1));
         Equal(1, clock.ElapsedSeconds);
+    }),
+    ("explicit gap acknowledgement preserves both saved seconds and fractional progress", () =>
+    {
+        var clock = new FocusClock(10);
+        Equal(2, clock.Advance(2.5));
+        Equal(0, clock.Advance(6.1));
+        Equal(true, clock.GapDetected);
+        Equal(0, clock.Advance(1));
+        clock.ContinueAfterGap();
+        Equal(false, clock.GapDetected);
+        Equal(2, clock.ElapsedSeconds);
+        Equal(8, clock.RemainingSeconds);
+        Equal(1, clock.Advance(.5));
+        Equal(3, clock.ElapsedSeconds);
+        Equal(5, clock.Advance(5));
+        Equal(2, clock.Advance(5));
+        Equal(10, clock.ElapsedSeconds);
+        Equal(true, clock.IsComplete);
+    }),
+    ("repeated acknowledged gaps never accumulate time or prevent later completion", () =>
+    {
+        var clock = new FocusClock(120);
+        for (int observed = 1; observed <= 120; observed++)
+        {
+            Equal(1, clock.Advance(1));
+            Equal(observed, clock.ElapsedSeconds);
+            if (observed is 60 or 90)
+            {
+                Equal(0, clock.Advance(observed == 60 ? 6.1 : 12));
+                Equal(observed, clock.ElapsedSeconds);
+                Equal(120 - observed, clock.RemainingSeconds);
+                clock.ContinueAfterGap();
+                Equal(false, clock.GapDetected);
+                Equal(observed, clock.ElapsedSeconds);
+            }
+        }
+        Equal(true, clock.IsComplete);
+        Equal(0, clock.Advance(1));
+        Equal(120, clock.ElapsedSeconds);
+    }),
+    ("continuing after a long unobserved interval never backfills offline time", () =>
+    {
+        var clock = new FocusClock(1500);
+        Equal(1, clock.Advance(1.25));
+        Equal(0, clock.Advance(7200));
+        clock.ContinueAfterGap();
+        Equal(false, clock.GapDetected);
+        Equal(1, clock.ElapsedSeconds);
+        Equal(1499, clock.RemainingSeconds);
+        Equal(0, clock.Advance(.5));
+        Equal(1, clock.Advance(.25));
+        Equal(2, clock.ElapsedSeconds);
+        Equal(false, clock.IsComplete);
+    }),
+    ("gap acknowledgement is harmless before a gap and after completion", () =>
+    {
+        var clock = new FocusClock(2);
+        clock.ContinueAfterGap();
+        Equal(0, clock.ElapsedSeconds);
+        Equal(0, clock.Advance(.5));
+        clock.ContinueAfterGap();
+        Equal(2, clock.Advance(1.5));
+        clock.ContinueAfterGap();
+        Equal(true, clock.IsComplete);
+        Equal(2, clock.ElapsedSeconds);
+        Equal(0, clock.RemainingSeconds);
+        Equal(0, clock.Advance(1));
     }),
     ("invalid input throws without changing state", () =>
     {

@@ -25,7 +25,9 @@ public sealed class PlanetGrowthStore : IDisposable
         }
         _connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            DataSource = dbPath, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false
+            // Growth refresh is secondary UI work. If another writer holds this
+            // database, retry on the next refresh instead of blocking focus for 30 seconds.
+            DataSource = dbPath, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false, DefaultTimeout = 1
         }.ToString());
         _connection.Open();
         using var command = _connection.CreateCommand();
@@ -33,7 +35,7 @@ public sealed class PlanetGrowthStore : IDisposable
             PRAGMA journal_mode=WAL;
             PRAGMA synchronous=FULL;
             PRAGMA foreign_keys=ON;
-            PRAGMA busy_timeout=5000;
+            PRAGMA busy_timeout=1000;
             CREATE TABLE IF NOT EXISTS planet_state (
                 id INTEGER PRIMARY KEY CHECK(id=1),
                 activated_at TEXT NOT NULL,
