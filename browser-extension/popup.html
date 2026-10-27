@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>专注花园</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header><div class="mark" aria-hidden="true">◒</div><div><h1>专注花园</h1><p>让注意力，留在此刻。</p></div></header>
+  <main>
+    <section class="card" aria-live="polite"><span id="pill">读取状态</span><p id="status">正在连接扩展…</p><ul id="domains"></ul><small id="updated"></small></section>
+    <section class="pair"><label for="token">桌面配对码</label><input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="从桌面「使用限制」复制"><button id="pair">保存并连接</button></section>
+    <div class="actions"><button id="sync" class="secondary">立即同步</button><button id="unpair" class="secondary danger">解除限制并取消配对</button></div>
+    <p id="error" role="alert"></p>
+    <p class="footnote">仅限制目标网站的新页面访问，已打开页面可能继续使用。桌面退出或断联后自动解除；浏览器后台挂起时可能延迟。紧急时可点击上方解除按钮，或直接禁用本扩展。</p>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

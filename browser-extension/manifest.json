@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "专注花园 · 网站限制",
+  "version": "0.1.0",
+  "description": "配合专注花园 Windows 桌面应用，仅在专注期间限制配置网站的新页面访问。",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "alarms", "declarativeNetRequest"],
+  "host_permissions": ["http://127.0.0.1:17839/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "专注花园 · 网站限制", "default_popup": "popup.html" },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'" }
+}
