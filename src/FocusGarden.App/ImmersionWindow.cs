@@ -17,7 +17,7 @@ internal sealed class ImmersionWindow : Window
         Style = (Style)FindResource(typeof(Window));
         Background = new SolidColorBrush(Color.FromRgb(13, 20, 24));
         Foreground = LightText;
-        Title = "专注花园 · 全屏沉浸"; WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize;
+        Title = "专注星球 · 全屏沉浸"; WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize;
         WindowStartupLocation = WindowStartupLocation.CenterOwner; Topmost = true; ShowInTaskbar = false;
         Loaded += (_, _) => WindowState = WindowState.Maximized;
         var stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, MaxWidth = 900, Margin = new Thickness(40) };

@@ -1,4 +1,4 @@
-# 专注花园浏览器扩展
+# 专注星球浏览器扩展
 
 该扩展配合 Windows 桌面应用使用，支持 Chromium 120 及以上版本的 Microsoft Edge / Google Chrome。无需账号，不上传浏览记录。
 

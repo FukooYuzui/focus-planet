@@ -33,7 +33,7 @@ public static partial class AppRules
     // Keep recovery, shell and this application's own windows outside the app blocker.
     private static readonly HashSet<string> Protected = new(StringComparer.OrdinalIgnoreCase)
     {
-        "focusgarden", "explorer", "taskmgr", "system", "idle", "winlogon", "csrss", "lsass", "services",
+        "focusgarden", "专注星球", "focusplanet", "explorer", "taskmgr", "system", "idle", "winlogon", "csrss", "lsass", "services",
         "svchost", "smss", "dwm", "sihost", "fontdrvhost", "wininit", "logonui", "lockapp",
         "shellexperiencehost", "startmenuexperiencehost", "searchhost", "applicationframehost",
         "consent", "securityhealthsystray", "systemsettings", "cmd", "powershell", "pwsh", "windowsterminal"

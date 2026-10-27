@@ -37,6 +37,22 @@ CodexUsageImporter Importer(string f) => new(Path.Combine(f, "usage.db"));
 object Usage(long input, long output, long cached = 0, long reasoning = 0) => new { input_tokens = input, output_tokens = output, cached_input_tokens = cached, reasoning_output_tokens = reasoning, total_tokens = input + output };
 string Event(int second, object total, object? last, DateTimeOffset? date = null) => JsonSerializer.Serialize(new { timestamp = (date ?? local).AddSeconds(second).ToString("O"), type = "event_msg", payload = new { type = "token_count", info = new { total_token_usage = total, last_token_usage = last } } }) + "\n";
 
+await Run("planet period excludes history and future with inclusive activation boundary", async f => {
+    var h = Home(f);
+    File.WriteAllText(Log(h), Event(-1, Usage(100, 0), Usage(100, 0)) + Event(0, Usage(300, 0), Usage(200, 0)) + Event(1, Usage(600, 0), Usage(300, 0)) + Event(2, Usage(1000, 0), Usage(400, 0)));
+    using var i = Importer(f); await i.ImportAsync(h);
+    Equal(500L, i.GetDailyTotalsSince(local, local.AddSeconds(1)).Values.Sum());
+    Equal(0, i.GetDailyTotalsSince(local, local.AddSeconds(-1)).Count);
+});
+await Run("planet period normalizes offsets and uses active source only", async f => {
+    var a = Home(f, "a"); var b = Home(f, "b");
+    var item = Event(0, Usage(100, 0), Usage(100, 0));
+    File.WriteAllText(Log(a), item); File.WriteAllText(Log(a, "copy.jsonl"), item);
+    File.WriteAllText(Log(b), Event(1, Usage(200, 0), Usage(200, 0)));
+    using var i = Importer(f); await i.ImportAsync(a);
+    Equal(100L, i.GetDailyTotalsSince(local.ToOffset(TimeSpan.FromHours(-4)), local.AddSeconds(2)).Values.Sum());
+    await i.ImportAsync(b); Equal(200L, i.GetDailyTotalsSince(local, local.AddSeconds(2)).Values.Sum());
+});
 await Run("basic daily total excludes cached and reasoning double count", async f => {
     var h = Home(f); File.WriteAllText(Log(h), Event(0, Usage(100, 30, 90, 10), Usage(100, 30, 90, 10)));
     using var i = Importer(f); var r = await i.ImportAsync(h);

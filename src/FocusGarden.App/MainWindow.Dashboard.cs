@@ -82,7 +82,7 @@ public partial class MainWindow
     private static string Duration(int seconds) => seconds >= 3600 ? $"{seconds / 3600} 小时 {seconds % 3600 / 60} 分" : seconds >= 60 ? $"{seconds / 60} 分 {seconds % 60} 秒" : $"{seconds} 秒";
     private static string AppDisplayName(string process) => process.ToLowerInvariant() switch
     {
-        "msedge.exe" => "Microsoft Edge", "chrome.exe" => "Google Chrome", "firefox.exe" => "Firefox", "codex.exe" => "Codex", "chatgpt.exe" => "ChatGPT", "focusgarden.exe" => "专注花园", "code.exe" => "Visual Studio Code", "obsidian.exe" => "Obsidian", "winword.exe" => "Word", "powerpnt.exe" => "PowerPoint", "excel.exe" => "Excel", "wechat.exe" or "weixin.exe" => "微信", "qq.exe" => "QQ", "explorer.exe" => "文件资源管理器", "notepad.exe" => "记事本", _ => process
+        "msedge.exe" => "Microsoft Edge", "chrome.exe" => "Google Chrome", "firefox.exe" => "Firefox", "codex.exe" => "Codex", "chatgpt.exe" => "ChatGPT", "focusgarden.exe" or "专注星球.exe" or "focusplanet.exe" => "专注星球", "code.exe" => "Visual Studio Code", "obsidian.exe" => "Obsidian", "winword.exe" => "Word", "powerpnt.exe" => "PowerPoint", "excel.exe" => "Excel", "wechat.exe" or "weixin.exe" => "微信", "qq.exe" => "QQ", "explorer.exe" => "文件资源管理器", "notepad.exe" => "记事本", _ => process
     };
     private void RefreshUsageUi()
     {
@@ -144,9 +144,9 @@ public partial class MainWindow
         await ImportTokensAsync();
     }
     private void CancelTokens(object sender, RoutedEventArgs e) { importCancellation?.Cancel(); TokenStatusText.Text = "正在停止读取…"; }
-    private async Task ImportTokensAsync()
+    private async Task<bool> ImportTokensAsync()
     {
-        if (importingTokens || dashboardClosed) return;
+        if (importingTokens || dashboardClosed) return false;
         importingTokens = true; importCancellation = new CancellationTokenSource(); lastTokenImportTick = Stopwatch.GetTimestamp();
         RefreshTokensButton.IsEnabled = false; ChooseCodexFolderButton.IsEnabled = false; TokenYearNavigation.IsEnabled = false; CancelTokensButton.Visibility = Visibility.Visible;
         try
@@ -155,13 +155,15 @@ public partial class MainWindow
             CodexSourceText.Text = "当前图表来源：" + (tokenImporter.ActiveSource ?? "尚无缓存") + "\n正在读取：" + home;
             TokenStatusText.Text = "正在读取本机记录并去重…首次导入历史日志可能需要一会儿，不影响专注计时。";
             var result = await tokenImporter.ImportAsync(home, importCancellation.Token);
-            if (dashboardClosed) return;
+            if (dashboardClosed) return false;
             RefreshTokenUi();
+            ReloadPlanetTokens(); var planetSaved = RefreshPlanet();
             CodexSourceText.Text = "当前图表来源：" + result.SourceRoot;
             TokenStatusText.Text = $"已更新 {result.CompletedAt.ToLocalTime():HH:mm:ss} · {result.DaysWithUsage} 天记录 · 本次读取 {result.FilesScanned} 个文件，跳过 {result.FilesUnchanged} 个未变化文件" + (result.ReadErrors > 0 ? $" · {result.ReadErrors} 个文件未能读取" : "");
+            return result.ReadErrors == 0 && planetSaved;
         }
-        catch (OperationCanceledException) { if (!dashboardClosed) { TokenStatusText.Text = "已取消读取，图表保留上次显示结果。"; CodexSourceText.Text = "当前图表来源：" + (tokenImporter.ActiveSource ?? "尚无缓存"); } }
-        catch (Exception ex) { if (!dashboardClosed) { TokenStatusText.Text = "本机用量暂不可用：" + ex.Message; CodexSourceText.Text = "当前图表来源：" + (tokenImporter.ActiveSource ?? "尚无缓存") + "\n待读取目录：" + dashboardPreferences.ResolveCodexHome(); } }
+        catch (OperationCanceledException) { if (!dashboardClosed) { TokenStatusText.Text = "已取消读取，图表保留上次显示结果。"; CodexSourceText.Text = "当前图表来源：" + (tokenImporter.ActiveSource ?? "尚无缓存"); } return false; }
+        catch (Exception ex) { if (!dashboardClosed) { TokenStatusText.Text = "本机用量暂不可用：" + ex.Message; CodexSourceText.Text = "当前图表来源：" + (tokenImporter.ActiveSource ?? "尚无缓存") + "\n待读取目录：" + dashboardPreferences.ResolveCodexHome(); } return false; }
         finally
         {
             importingTokens = false; lastTokenImportTick = Stopwatch.GetTimestamp(); importCancellation?.Dispose(); importCancellation = null;

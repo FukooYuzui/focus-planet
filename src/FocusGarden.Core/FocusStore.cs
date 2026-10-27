@@ -226,6 +226,20 @@ public sealed class FocusStore : IDisposable
         }
     }
 
+    public Dictionary<string, int> GetAllDailyTotals()
+    {
+        lock (_gate)
+        {
+            CheckDisposed();
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT day,SUM(seconds) FROM session_days GROUP BY day ORDER BY day";
+            using var reader = command.ExecuteReader();
+            var result = new Dictionary<string, int>(StringComparer.Ordinal);
+            while (reader.Read()) result.Add(reader.GetString(0), reader.GetInt32(1));
+            return result;
+        }
+    }
+
     private static IEnumerable<KeyValuePair<string, int>> AllocateLocalDays(DateTimeOffset start, int seconds)
     {
         var end = start.AddSeconds(seconds);

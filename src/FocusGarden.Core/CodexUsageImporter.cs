@@ -256,6 +256,25 @@ public sealed class CodexUsageImporter : IDisposable
         }
     }
 
+    /// <summary>Deduplicated events in the active source during an inclusive UTC period.
+    /// Used for planet rewards so historical usage never credits a newly created game.</summary>
+    public Dictionary<string, long> GetDailyTotalsSince(DateTimeOffset cutoff, DateTimeOffset? until = null)
+    {
+        var end = until ?? DateTimeOffset.UtcNow;
+        lock (gate)
+        {
+            CheckDisposed();
+            var result = new Dictionary<string, long>(StringComparer.Ordinal);
+            if (activeSource == null || end < cutoff) return result;
+            using var c = Command("SELECT local_day,SUM(total_tokens) FROM codex_token_events e WHERE timestamp_utc >= $start AND timestamp_utc <= $end AND EXISTS (SELECT 1 FROM codex_usage_file_events f WHERE f.event_id=e.event_id AND f.source_root=$root) GROUP BY local_day ORDER BY local_day",
+                ("$start", cutoff.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)),
+                ("$end", end.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture)), ("$root", activeSource));
+            using var r = c.ExecuteReader();
+            while (r.Read()) result[r.GetString(0)] = r.GetInt64(1);
+            return result;
+        }
+    }
+
     private SqliteCommand Command(string text, params (string Name, object? Value)[] parameters)
     {
         var c = connection.CreateCommand(); c.CommandText = text;

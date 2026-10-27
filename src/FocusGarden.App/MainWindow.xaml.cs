@@ -55,9 +55,10 @@ public partial class MainWindow : Window
         SystemEvents.PowerModeChanged += PowerChanged;
         SystemEvents.SessionSwitch += SessionChanged;
         Closing += ClosingWindow;
-        Closed += (_, _) => { shuttingDown = true; timer.Stop(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); CloseDashboard(); bridge.Dispose(); store.Dispose(); };
+        Closed += (_, _) => { shuttingDown = true; timer.Stop(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); CloseDashboard(); ClosePlanet(); bridge.Dispose(); store.Dispose(); };
         RefreshStatistics();
         InitializeDashboard();
+        InitializePlanet();
     }
     private nint WindowHook(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
     {
@@ -72,11 +73,13 @@ public partial class MainWindow : Window
     }
     private void Page(string page)
     {
+        PlanetPage.Visibility = page == "planet" ? Visibility.Visible : Visibility.Collapsed;
         FocusPage.Visibility = page == "focus" ? Visibility.Visible : Visibility.Collapsed;
         StatsPage.Visibility = page == "stats" ? Visibility.Visible : Visibility.Collapsed;
         RulesPage.Visibility = page == "rules" ? Visibility.Visible : Visibility.Collapsed;
-        PageTitle.Text = page switch { "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
-        PageSubtitle.Text = page switch { "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；紧急退出始终可用。", _ => "选一件小事，开始一段完整的专注。" };
+        PageTitle.Text = page switch { "planet" => "把每一份投入，变成一个小世界。", "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
+        PageSubtitle.Text = page switch { "planet" => "六个月的陪伴，从一颗荒凉星球出发。", "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；紧急退出始终可用。", _ => "选一件小事，开始一段完整的专注。" };
+        PageScroller.ScrollToTop();
     }
     private void ShowFocus(object sender, RoutedEventArgs e) { RefreshStatistics(); Page("focus"); }
     private void ShowStats(object sender, RoutedEventArgs e) { RefreshStatistics(); Page("stats"); }
@@ -124,7 +127,7 @@ public partial class MainWindow : Window
             if (!int.TryParse(FocusMinutesInput.Text, out var focus) || focus < 1 || focus > 180) throw new ArgumentException("专注时长请输入 1–180 分钟。");
             if (!int.TryParse(BreakMinutesInput.Text, out var rest) || rest < 1 || rest > 60) throw new ArgumentException("休息时长请输入 1–60 分钟。");
             var apps = Lines(AppsInput.Text).Select(AppRules.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            if (apps.Any(n => NativeFocus.Protected.Contains(n))) throw new ArgumentException("不能限制系统桌面、任务管理器或专注花园等逃生应用。");
+            if (apps.Any(n => NativeFocus.Protected.Contains(n))) throw new ArgumentException("不能限制系统桌面、任务管理器或专注星球等逃生应用。");
             var candidate = new FocusSettings { FocusMinutes = focus, BreakMinutes = rest, Immersive = ImmersiveCheck.IsChecked == true, BlockedApps = apps, BlockedDomains = Lines(DomainsInput.Text).Select(DomainRules.Normalize).Distinct().ToArray() };
             store.SaveSettings(candidate); settings = candidate;
             AppsInput.Text = string.Join(Environment.NewLine, settings.BlockedApps); DomainsInput.Text = string.Join(Environment.NewLine, settings.BlockedDomains);
@@ -175,6 +178,7 @@ public partial class MainWindow : Window
     {
         UpdateWallClock();
         DashboardTick();
+        PlanetTick();
         ApiStatus.Text = bridge.Error != null ? "本机连接服务不可用：" + bridge.Error : DateTimeOffset.UtcNow - bridge.LastContact < TimeSpan.FromSeconds(20) ? "● 浏览器扩展已连接（仅代表通信成功）" : "○ 等待扩展连接 · 本机服务已就绪";
         if (clock == null) return;
         var now = Stopwatch.GetTimestamp(); var delta = Stopwatch.GetElapsedTime(lastTimestamp, now).TotalSeconds; lastTimestamp = now;
@@ -200,7 +204,7 @@ public partial class MainWindow : Window
         if (clock == null) return;
         TimerText.Text = FormatTime(clock.RemainingSeconds); TimerProgress.Value = (double)clock.ElapsedSeconds / plannedSeconds;
         immersion?.UpdateTime(TimerText.Text);
-        Title = $"{TimerText.Text} · 专注花园 0.3" + (App.TestMode ? " [独立验收模式]" : "");
+        Title = $"{TimerText.Text} · 专注星球 0.4" + (App.TestMode ? " [独立验收模式]" : "");
     }
     private static string FormatTime(int seconds) => $"{seconds / 60:00}:{seconds % 60:00}";
     private void EnterFullscreenClick(object sender, RoutedEventArgs e) => EnterFullscreen();
@@ -235,7 +239,7 @@ public partial class MainWindow : Window
             try { store.EndSession(id.Value, status, DateTimeOffset.Now); }
             catch (Exception ex) { message += " 记录结束状态保存失败，下次启动将恢复为中断：" + ex.Message; }
         }
-        Title = "专注花园 0.3 · Focus Garden" + (App.TestMode ? " [独立验收模式]" : "");
+        Title = "专注星球 0.4 · Focus Planet" + (App.TestMode ? " [独立验收模式]" : "");
         SessionLabel.Text = status == "completed" ? "完成一段，让专注慢慢生长。" : "下一次，继续从这里开始。";
         Status(message); RefreshStatistics(); Activate();
     }
@@ -301,9 +305,10 @@ public partial class MainWindow : Window
         YearLabel.Text = year.ToString(); YearSummary.Text = $"{year} 年累计 {daily.Values.Sum() / 3600.0:0.#} 小时 · 每一格是一天";
         StatsYearSummary.Text = $"当前统计年份：{year}。年度热力图和年份切换位于番茄钟主页。";
         DrawHeatmap(daily);
+        RefreshPlanet();
         HistoryPanel.Children.Clear();
         var latest = sessions.Take(12).ToArray();
-        if (latest.Length == 0) HistoryPanel.Children.Add(new TextBlock { Text = "还没有记录。完成第一段专注，让花园开始生长。", Foreground = (Brush)FindResource("Muted"), Margin = new Thickness(0, 8, 0, 18) });
+        if (latest.Length == 0) HistoryPanel.Children.Add(new TextBlock { Text = "还没有记录。完成第一段专注，让星球开始生长。", Foreground = (Brush)FindResource("Muted"), Margin = new Thickness(0, 8, 0, 18) });
         foreach (var s in latest)
         {
             var grid = new Grid(); grid.ColumnDefinitions.Add(new ColumnDefinition()); grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(145) });
