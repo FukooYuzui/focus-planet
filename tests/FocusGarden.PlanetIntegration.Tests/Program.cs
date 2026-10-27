@@ -36,7 +36,7 @@ internal static class Program
                 var s = Field<PlanetSnapshot>(fresh, "planetSnapshot");
                 Assert(s.TotalGrowth == 0 && s.Level == 0);
                 Assert(Field<FrameworkElement>(fresh, "PlanetPage").Visibility == Visibility.Visible);
-                Assert(fresh.Title.Contains("专注星球 0.4"));
+                Assert(fresh.Title.Contains("专注星球 0.5"));
             });
             Run("new focus feeds planet once and page navigation preserves timer setup", () =>
             {
@@ -111,6 +111,18 @@ internal static class Program
                 Call(mature, "RefreshPlanet"); Assert(Field<TextBox>(mature, "PlanetNameInput").Text == "未提交的名字");
                 Field<TextBox>(mature, "PlanetNameInput").Text = "星海家园 · 演示";
             });
+            Run("expanded viewing and editing reuse the live scene and restore its parent", () =>
+            {
+                var host = Field<ContentControl>(mature, "PlanetSceneHost"); var original = host.Content;
+                var card = Field<Border>(mature, "PlanetLayoutCard"); var parent = card.Parent;
+                foreach (bool edit in new[] { false, true })
+                {
+                    var expanded = (Window)mature.GetType().GetMethod("CreatePlanetWorkspace", Flags)!.Invoke(mature, new object[] { edit })!;
+                    Assert(host.Content == null && !expanded.IsVisible);
+                    if (args.Length == 2 && args[0] == "--render") Render(expanded, Path.Combine(args[1], edit ? "专注星球-展开布置演示.png" : "专注星球-展开观景演示.png"), 1480, 960);
+                    expanded.Close(); Assert(ReferenceEquals(host.Content, original) && ReferenceEquals(card.Parent, parent));
+                }
+            });
             Run("failed growth commit prevents travel and later retry credits original planet", () =>
             {
                 var prefs = Field<object>(mature, "dashboardPreferences");
@@ -141,12 +153,12 @@ internal static class Program
     private static void Call(object o, string name, params object[] values) => o.GetType().GetMethod(name, Flags)!.Invoke(o, values);
     private static void Event(object o, string name) => Call(o, name, o, new RoutedEventArgs());
     private static void Assert(bool condition) { if (!condition) throw new Exception("Assertion failed"); }
-    private static void Render(MainWindow window, string path)
+    private static void Render(Window window, string path, int width = 1380, int height = 1040)
     {
         var content = (FrameworkElement)window.Content; window.Content = null;
-        var container = new Border { Background = window.Background, Child = content, Width = 1280, Height = 940 };
-        container.Measure(new Size(1280, 940)); container.Arrange(new Rect(0, 0, 1280, 940)); container.UpdateLayout();
-        var image = new RenderTargetBitmap(1280, 940, 96, 96, PixelFormats.Pbgra32); image.Render(container);
+        var container = new Border { Background = window.Background, Child = content, Width = width, Height = height };
+        container.Measure(new Size(width, height)); container.Arrange(new Rect(0, 0, width, height)); container.UpdateLayout();
+        var image = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32); image.Render(container);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!); using var stream = File.Create(path); encoder.Save(stream);
         container.Child = null; window.Content = content;

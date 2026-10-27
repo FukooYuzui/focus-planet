@@ -7,7 +7,7 @@ namespace FocusGarden.App;
 internal sealed record PlanetSceneMotion(Model3DGroup Model,Transform3D Surface,string Kind);
 internal sealed record PlanetScene(Model3DGroup Model, IReadOnlyDictionary<string, int> Features, IReadOnlyDictionary<GeometryModel3D,int> PlotHits,IReadOnlyList<PlanetSceneMotion> Motions);
 
-internal static class PlanetView3DScene
+internal static partial class PlanetView3DScene
 {
     private const double Radius=2.7;
     internal static IReadOnlyList<(double Latitude,double Longitude)> Plots {get;}=CreatePlots();
@@ -17,47 +17,54 @@ internal static class PlanetView3DScene
         if(weather is not ("clear" or "cloudy" or "rain" or "aurora"))throw new ArgumentException("Unknown weather.",nameof(weather));
         var world=new Model3DGroup(); var features=new Dictionary<string,int>(); var random=new Random(seed);var hitPlots=new Dictionary<GeometryModel3D,int>();var motions=new List<PlanetSceneMotion>();
         void Count(string name) => features[name]=features.GetValueOrDefault(name)+1;
-        var terrain=new Dictionary<string,MeshGeometry3D>();
-        string[] seas=["#389AA3","#42A4AB","#4CAFB1","#3DA0AA","#55B6B7"];
-        string[] grasses=level switch {0=>["#928D7C","#A19A86","#ACA490","#999381","#878777"],1=>["#81976B","#98AA76","#A0AF7F","#AAA881","#8B9F75"],_=>["#73AD6D","#85BA78","#8AC17E","#9CC989","#75B47C"]};
-        foreach(var(a,b,c) in PlanetView3DGeometry.SphereFaces(3))
-        {
-            var n=((Vector3D)a+(Vector3D)b+(Vector3D)c)/3;n.Normalize();
-            double land=Land(n)+(level==0?.18:level==1?.08:0), pattern=Math.Sin(n.X*27+n.Z*13)*Math.Cos(n.Y*19);
-            int tone=Math.Clamp((int)((pattern+1)*2.49),0,4);
-            string color=land>.018?grasses[tone]:land>-.035?"#C8C79A":seas[tone];
-            if(!terrain.TryGetValue(color,out var mesh))terrain.Add(color,mesh=new MeshGeometry3D());
-            PlanetView3DGeometry.Triangle(mesh,(Point3D)((Vector3D)a*Radius),(Point3D)((Vector3D)b*Radius),(Point3D)((Vector3D)c*Radius));
-        }
-        foreach(var(color,mesh) in terrain) {mesh.Freeze();Add(world,mesh,color);}
+        world.Children.Add(PlanetSurface(level));
         Count("terrain");
         // Landmarks use local Y as their up direction, rotated into the actual surface normal.
-        Place(43,-31,Mountain(.42,.74),"mountain"); Place(46,-17,Mountain(.31,.48),"mountain"); Place(34,-39,Mountain(.24,.40),"mountain");
-        Place(-26,125,Mountain(.39,.70),"mountain");Place(6,-115,Mountain(.32,.50),"mountain");
-        for(int i=0;i<16;i++)
+        Place(43,-31,Mountain(.38,.58),"mountain"); Place(46,-17,Mountain(.28,.39),"mountain"); Place(34,-39,Mountain(.23,.32),"mountain");
+        if(!NearPlot(-26,125))Place(-26,125,Mountain(.31,.48),"mountain");if(!NearPlot(6,-115))Place(6,-115,Mountain(.25,.35),"mountain");
+        var sites=NatureSites(random,125);
+        for(int i=0;i<Math.Min(sites.Count,level==0?74:90);i++)
         {
-            double lat=-65+random.NextDouble()*130,lon=-180+random.NextDouble()*360;
-            if(Land(PlanetView3DGeometry.Direction(lat,lon))+(level==0?.18:level==1?.08:0)<-.07) {var foam=new Model3DGroup();Add(foam,PlanetView3DGeometry.Box(-.09,0,-.012,.18,.008,.025),"#A3DECE"); Place(lat,lon,foam,"wave",radius:2.705);}
+            var site=sites[i];double size=.68+random.NextDouble()*.30;
+            if(level==0)
+            {
+                var piece=(i%7) switch {0=>Crater(.15+random.NextDouble()*.06),1=>CrystalCluster(size),2=>RockStrata(size),_=>RockCluster(size)};
+                Place(site.Lat,site.Lon,piece,i%7==0?"crater":i%7==1?"crystal":"rocks",heading:random.Next(360));
+            }
+            else
+            {
+                Model3DGroup piece;string key;
+                if(i%9<4){piece=SoftTree(size,i%3);key="tree";}
+                else if(i%9==4){piece=ShrubPatch(size);key="shrub";}
+                else if(i%9==5){piece=Wildflowers(size);key="flowers";}
+                else if(i%9==6){piece=Mushrooms(size);key="mushrooms";}
+                else if(i%9==7){piece=RockCluster(size*.8);key="rocks";}
+                else {piece=level>=2?MeadowHabitat(size):CrystalCluster(size*.7);key=level>=2?"habitat":"crystal";}
+                Place(site.Lat,site.Lon,piece,key,heading:random.Next(360));
+            }
         }
-        if(level>=1)
+        for(int i=0;i<90;i++)
         {
-            (double Lat,double Lon)[] trees=[(15,-39),(6,-43),(-5,-28),(29,-45),(53,-1),(51,22),(24,5),(-10,-4),(0,18),(37,5),(36,75),(14,95),(-4,107),(-27,146),(-38,159),(8,-93),(-17,-78),(44,131),(11,152)];
-            foreach(var(lat,lon) in trees) if(!NearPlot(lat,lon)) Place(lat,lon,Tree(.75+random.NextDouble()*.38,random.Next(3)==0),"tree",heading:random.Next(360));
-            foreach(var(lat,lon) in new[]{(-2.0,-13.0),(17.0,13.0),(20.0,-24.0),(-12.0,-21.0),(30.0,96.0)})Place(lat,lon,Flowers(),"flowers");
+            double lat=-70+random.NextDouble()*140,lon=-180+random.NextDouble()*360;double coast=Land(PlanetView3DGeometry.Direction(lat,lon))+(level==0?.18:level==1?.08:0);
+            if(coast<-.025&&coast>-.27) Place(lat,lon,WaterRipples(.6+random.NextDouble()*.6),"wave",radius:2.704,heading:random.Next(25)-12);
+            else if(coast is >-.017 and <.017&&!NearPlot(lat,lon))Place(lat,lon,ShorePebbles(),"shore",radius:2.704,heading:random.Next(360));
         }
         if(level>=2)
         {
-            Place(11,19,Sheep(),"creature",heading:-20);Place(4,31,Sheep(),"creature",heading:35);Place(-6,-22,Rabbit(),"creature",heading:-40);Place(23,90,Rabbit(),"creature",heading:55);
+            for(int i=90;i<Math.Min(sites.Count,level>=5?108:102);i++)
+            {
+                var site=sites[i];var animal=(i%5) switch {0=>SoftSheep(),1=>SoftRabbit(),2=>Fox(),3=>Duck(),_=>Deer()};
+                Place(site.Lat,site.Lon,animal,"creature",heading:random.Next(360));
+            }
         }
         if(level>=5)
         {
             var ring=new Model3DGroup();Add(ring,PlanetView3DGeometry.Ring(3.35,.065,0),"#C8D7B0",true,true);Add(ring,PlanetView3DGeometry.Ring(3.49,.018,0),"#6BAEA7",true,true); ring.Transform=new RotateTransform3D(new AxisAngleRotation3D(new(0,0,1),-24));world.Children.Add(ring);Count("ring");
-            Place(-18,1,Rabbit(),"creature",heading:35);Place(36,152,Sheep(),"creature");
         }
         foreach(var building in buildings??[])
         {
             if(building.PlotId is <0 or >=32||building.QuarterTurns is <0 or >3)throw new ArgumentException("Invalid building placement.",nameof(buildings));
-            Model3DGroup obj=building.Kind switch {"tree"=>Tree(1,true),"flower"=>Flowers(),"house"=>House("#E4D5A8","#B9705C"),"windmill"=>Windmill(),"tower"=>Tower(),"observatory"=>Observatory(),_=>throw new ArgumentException("Unknown building kind.",nameof(buildings))};
+            Model3DGroup obj=building.Kind switch {"tree"=>SoftTree(1,1),"flower"=>Wildflowers(1.2),"house"=>DetailedHouse("#F0DEB8","#BD7963"),"windmill"=>DetailedWindmill(),"tower"=>DetailedTower(),"observatory"=>DetailedObservatory(),_=>throw new ArgumentException("Unknown building kind.",nameof(buildings))};
             var plot=Plots[building.PlotId];Place(plot.Latitude,plot.Longitude,obj,building.Kind,heading:building.QuarterTurns*90);
             if(editMode)MapHits(obj,building.PlotId);
         }
@@ -74,7 +81,7 @@ internal static class PlanetView3DScene
         }
         if(weather is "cloudy" or "rain")
         {
-            Place(39,-52,Cloud(),"cloud",radius:3.48);Place(18,50,Cloud(),"cloud",radius:3.42);Place(62,80,Cloud(),"cloud",radius:3.46);
+            Place(39,-52,SoftCloud(),"cloud",radius:3.48);Place(18,50,SoftCloud(),"cloud",radius:3.42);Place(62,80,SoftCloud(),"cloud",radius:3.46);
             if(weather=="rain")foreach(var(lat,lon) in new[]{(39.0,-52.0),(18.0,50.0)}) {var drops=new Model3DGroup();for(int i=0;i<7;i++) {double x=(i%4-.5)*.13,z=(i/4-.5)*.16;Add(drops,PlanetView3DGeometry.Ellipsoid(x,-.12-(i%3)*.11,z,.012,.10,.012,0),"#91DCE7",true);}Place(lat,lon,drops,"rain",radius:3.36);}
         }
         if(weather=="aurora")
@@ -161,6 +168,6 @@ internal static class PlanetView3DScene
     }
     private static void Add(Model3DGroup group,MeshGeometry3D mesh,string color,bool emissive=false,bool doubleSided=false)
     {
-        var brush=new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));brush.Freeze();Material material=emissive?new EmissiveMaterial(brush):new DiffuseMaterial(brush);material.Freeze();var model=new GeometryModel3D(mesh,material);if(doubleSided)model.BackMaterial=material;group.Children.Add(model);
+        var material=SharedMaterial(color,emissive);var model=new GeometryModel3D(mesh,material);if(doubleSided)model.BackMaterial=material;group.Children.Add(model);
     }
 }

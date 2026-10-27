@@ -47,7 +47,11 @@ internal sealed class PlanetView3D : UserControl
         var toolbar=new Grid {Margin=new Thickness(16,12,14,0)};
         toolbar.ColumnDefinitions.Add(new ColumnDefinition());toolbar.ColumnDefinitions.Add(new ColumnDefinition {Width=GridLength.Auto});
         toolbar.Children.Add(status);
-        var reset=new Button {Content="重置视角",Foreground=Brush("#E2EDE5"),Background=Brush("#263B3D"),BorderBrush=Brush("#47605C"),BorderThickness=new Thickness(1),Padding=new Thickness(10,5,10,5),FontSize=11,ToolTip="恢复默认朝向和大小，也可双击星球或按 Home。"};reset.Click+=(_,_)=>ResetView();Grid.SetColumn(reset,1);toolbar.Children.Add(reset);root.Children.Add(toolbar);
+        var actions=new StackPanel {Orientation=Orientation.Horizontal};
+        Button CameraButton(string label,Action action,string hint){var b=new Button {Content=label,Foreground=Brush("#E5ECFF"),Background=Brush("#263853"),BorderBrush=Brush("#4B6385"),BorderThickness=new Thickness(1),Padding=new Thickness(10,5,10,5),FontSize=11,ToolTip=hint,Margin=new Thickness(0,0,7,0)};b.Click+=(_,_)=>action();return b;}
+        actions.Children.Add(CameraButton("−",()=>SetZoom(zoom/ .85),"缩小，查看整体"));
+        actions.Children.Add(CameraButton("＋",()=>SetZoom(zoom*.85),"放大，观察细节"));
+        actions.Children.Add(CameraButton("重置视角",ResetView,"恢复默认朝向和大小，也可双击星球或按 Home。"));Grid.SetColumn(actions,1);toolbar.Children.Add(actions);root.Children.Add(toolbar);
         var surface=new Border {Background=Brush("#01000000"),Child=viewport,ClipToBounds=true};Grid.SetRow(surface,1);root.Children.Add(surface);
         var instruction=new TextBlock {Text="拖动探索星球  ·  滚轮缩放  ·  双击重置",Foreground=Brush("#A9BCB8"),FontSize=11,HorizontalAlignment=HorizontalAlignment.Center,Margin=new Thickness(10,0,10,12),TextWrapping=TextWrapping.Wrap};Grid.SetRow(instruction,2);root.Children.Add(instruction);Content=root;
         viewport.Camera=camera;viewport.Children.Add(scene);
@@ -131,7 +135,10 @@ internal sealed class PlanetView3D : UserControl
     private void UpdateCamera()
     {
         double aspect=Math.Max(.4,viewport.ActualWidth/Math.Max(1,viewport.ActualHeight));
-        double distance=Math.Max(4.15,3.8*aspect)/Math.Tan(camera.FieldOfView*Math.PI/360)*zoom;
+        // WPF FieldOfView is horizontal. Fit against the tighter axis so large and narrow
+        // windows keep the planet prominent; zoom remains relative when the viewport resizes.
+        double tangent=Math.Tan(camera.FieldOfView*Math.PI/360)/Math.Max(1,aspect);
+        double distance=Math.Max(4.05,3.15/Math.Sin(Math.Atan(tangent))*zoom);
         camera.Position=new(0,.18,distance);camera.LookDirection=new(0,-.18,-distance);camera.UpDirection=new(0,1,0);
     }
     private static SolidColorBrush Brush(string hex) {var b=new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));b.Freeze();return b;}
@@ -139,11 +146,13 @@ internal sealed class PlanetView3D : UserControl
     {
         var drawing=new DrawingGroup();using(var dc=drawing.Open())
         {
-            var background=new RadialGradientBrush {Center=new(.5,.46),GradientOrigin=new(.5,.45),RadiusX=.62,RadiusY=.8};background.GradientStops.Add(new(Color.FromRgb(34,66,66),0));background.GradientStops.Add(new(Color.FromRgb(14,27,38),.57));background.GradientStops.Add(new(Color.FromRgb(9,17,26),1));
+            var background=new RadialGradientBrush {Center=new(.5,.46),GradientOrigin=new(.5,.45),RadiusX=.66,RadiusY=.8};background.GradientStops.Add(new(Color.FromRgb(22,42,69),0));background.GradientStops.Add(new(Color.FromRgb(12,19,38),.57));background.GradientStops.Add(new(Color.FromRgb(5,9,22),1));
             dc.DrawRectangle(background,null,new Rect(0,0,1200,750));var random=new Random(7241);
-            for(int i=0;i<120;i++){double x=random.NextDouble()*1200,y=random.NextDouble()*750,r=i%13==0?1.6:.6+random.NextDouble()*.55;dc.DrawEllipse(Brush(i%13==0?"#A3C7C4":"#567779"),null,new(x,y),r,r);}
-            var orbitPen=new Pen(Brush("#193D43"),1);dc.DrawEllipse(null,orbitPen,new(600,360),490,300);
+            foreach(var cloud in new[]{(X:180.0,Y:190.0,R:320.0,Color:"#304A3477"),(X:1040.0,Y:560.0,R:370.0,Color:"#2434678B")})
+            {var haze=new RadialGradientBrush((Color)ColorConverter.ConvertFromString(cloud.Color),Colors.Transparent);dc.DrawEllipse(haze,null,new(cloud.X,cloud.Y),cloud.R,cloud.R*.7);}
+            for(int i=0;i<310;i++){double x=random.NextDouble()*1200,y=random.NextDouble()*750,r=i%19==0?1.7:.35+random.NextDouble()*.65;var color=Brush(i%19==0?"#CCDDF8":i%7==0?"#9C92C5":"#637694");dc.DrawEllipse(color,null,new(x,y),r,r);if(i%53==0){var p=new Pen(Brush("#8A99B9"),.7);dc.DrawLine(p,new(x-4,y),new(x+4,y));dc.DrawLine(p,new(x,y-4),new(x,y+4));}}
         }
+        drawing.ClipGeometry=new RectangleGeometry(new Rect(0,0,1200,750));
         drawing.Freeze();var result=new DrawingBrush(drawing){Stretch=Stretch.Fill};result.Freeze();return result;
     }
 }

@@ -3,6 +3,8 @@ using System.Globalization;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
 using FocusGarden.Core;
 
 namespace FocusGarden.App;
@@ -20,6 +22,7 @@ public partial class MainWindow
     private int displayedPlanetLevel = -1;
     private int? selectedPlanetPlot;
     private bool travellingPlanet;
+    private Window? observationWindow;
     private string? placingPlanetKind, movingPlanetBuilding;
     private string PlanetKey => planetSnapshot!.PlanetId.ToString(CultureInfo.InvariantCulture);
 
@@ -93,7 +96,7 @@ public partial class MainWindow
                 displayedPlanetId = s.PlanetId;
                 PlanetNameInput.Text = s.Name;
                 selectedPlanetPlot = null; placingPlanetKind = null; movingPlanetBuilding = null;
-                PlanetSceneHost.Height = 470;
+                PlanetSceneHost.Height = 650;
                 PlanetEditCheck.IsChecked = false; planetView.SetEditMode(false); planetView.ResetView();
                 RefreshPlanetBuildings(); RefreshPlanetSelector();
             }
@@ -165,7 +168,7 @@ public partial class MainWindow
     {
         bool enabled = PlanetEditCheck.IsChecked == true;
         planetView?.SetEditMode(enabled);
-        PlanetSceneHost.Height = enabled ? Math.Clamp(Math.Max(ActualHeight, Height) - 550, 350, 410) : 470;
+        PlanetSceneHost.Height = 650;
         placingPlanetKind = null; movingPlanetBuilding = null; selectedPlanetPlot = null;
         PlanetLayoutHint.Text = enabled ? "选择一种景观或建筑并点击放置，也可以点击已有建筑所在的地块进行调整。" : "布局已自动保存。拖动星球可以查看各处活动。";
         UpdatePlanetLayoutButtons();
@@ -174,7 +177,7 @@ public partial class MainWindow
     {
         if (PlanetBuildingChoice.SelectedItem is not BuildingChoice choice) return;
         PlanetEditCheck.IsChecked = true; planetView?.SetEditMode(true);
-        PlanetSceneHost.Height = Math.Clamp(Math.Max(ActualHeight, Height) - 550, 350, 410);
+        PlanetSceneHost.Height = 650;
         placingPlanetKind = choice.Kind; movingPlanetBuilding = null;
         PlanetLayoutHint.Text = "请在星球上点击一个空地块放置。可拖动星球寻找位置。";
         UpdatePlanetLayoutButtons();
@@ -234,7 +237,48 @@ public partial class MainWindow
         try { action(); }
         catch (Exception ex) { PlanetLayoutHint.Text = ex.Message; Status(ex.Message); }
     }
-    private void ClosePlanet() { planetLayout?.Dispose(); planetStore?.Dispose(); }
+    private void ExpandPlanetView(object sender, RoutedEventArgs e)
+    {
+        CreatePlanetWorkspace(false)?.Show();
+    }
+    private void ExpandPlanetEditor(object sender, RoutedEventArgs e) => CreatePlanetWorkspace(true)?.Show();
+    private Window? CreatePlanetWorkspace(bool editing)
+    {
+        if (planetView == null || observationWindow != null) return null;
+        PlanetEditCheck.IsChecked = editing; TogglePlanetEdit(this, new RoutedEventArgs());
+        var panel = new DockPanel { Background = new SolidColorBrush(Color.FromRgb(7, 13, 29)) };
+        System.Windows.Documents.TextElement.SetForeground(panel, (Brush)FindResource("Text"));
+        System.Windows.Documents.TextElement.SetFontFamily(panel, new FontFamily("Microsoft YaHei UI"));
+        var bar = new DockPanel { Margin = new Thickness(24, 12, 24, 10) };
+        var back = new Button { Content = "返回主页  ·  Esc", Padding = new Thickness(14, 8, 14, 8), Margin = new Thickness(12, 0, 0, 0) };
+        DockPanel.SetDock(back, Dock.Right); bar.Children.Add(back);
+        bar.Children.Add(new TextBlock { Text = planetSnapshot?.Name + (editing ? "  /  布置我的家园" : "  /  星球观景"), Foreground = Brushes.White, FontSize = 20, VerticalAlignment = VerticalAlignment.Center });
+        DockPanel.SetDock(bar, Dock.Top); panel.Children.Add(bar);
+        var sceneArea = new Grid(); sceneArea.ColumnDefinitions.Add(new ColumnDefinition());
+        var editorParent = PlanetLayoutCard.Parent as Panel;
+        int editorIndex = editorParent?.Children.IndexOf(PlanetLayoutCard) ?? -1;
+        var editorMargin = PlanetLayoutCard.Margin;
+        ScrollViewer? toolbox = null;
+        if (editing && editorParent != null)
+        {
+            editorParent.Children.Remove(PlanetLayoutCard); PlanetLayoutCard.Margin = new Thickness(12, 4, 18, 16);
+            toolbox = new ScrollViewer { Content = PlanetLayoutCard, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+            sceneArea.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(320) }); Grid.SetColumn(toolbox, 1); sceneArea.Children.Add(toolbox);
+        }
+        PlanetSceneHost.Content = null; sceneArea.Children.Add(planetView); panel.Children.Add(sceneArea);
+        var expanded = new Window { Title = editing ? "专注星球 · 展开布置" : "专注星球 · 展开观景", Owner = this.IsVisible ? this : null, WindowState = WindowState.Maximized, Content = panel, Background = panel.Background };
+        observationWindow = expanded;
+        back.Click += (_, _) => expanded.Close();
+        expanded.PreviewKeyDown += (_, args) => { if (args.Key == Key.Escape) { expanded.Close(); args.Handled = true; } };
+        expanded.Closed += (_, _) =>
+        {
+            sceneArea.Children.Remove(planetView); observationWindow = null;
+            if (toolbox != null) { toolbox.Content = null; PlanetLayoutCard.Margin = editorMargin; editorParent!.Children.Insert(Math.Min(editorIndex, editorParent.Children.Count), PlanetLayoutCard); }
+            if (!shuttingDown) PlanetSceneHost.Content = planetView;
+        };
+        return expanded;
+    }
+    private void ClosePlanet() { observationWindow?.Close(); planetLayout?.Dispose(); planetStore?.Dispose(); }
     private sealed record BuildingChoice(string Kind, string Label) { public override string ToString() => Label; }
     private sealed record PlanetChoice(long Id, string Label) { public override string ToString() => Label; }
 }

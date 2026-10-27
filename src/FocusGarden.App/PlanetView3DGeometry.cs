@@ -1,10 +1,13 @@
+using System.Collections.Concurrent;
 using System.Windows.Media.Media3D;
 
 namespace FocusGarden.App;
 
-/// <summary>Flat-shaded, outward-facing primitives used by the native WPF planet.</summary>
+/// <summary>Outward-facing flat and smooth primitives used by the native WPF planet.</summary>
 internal static class PlanetView3DGeometry
 {
+    private static readonly ConcurrentDictionary<int, MeshGeometry3D> SmoothSphereCache = new();
+
     internal static Vector3D Direction(double latitude, double longitude)
     {
         double lat = latitude * Math.PI / 180, lon = longitude * Math.PI / 180;
@@ -45,6 +48,78 @@ internal static class PlanetView3DGeometry
         foreach (var (a,b,c) in SphereFaces(detail)) Triangle(mesh, Stretch(a), Stretch(b), Stretch(c));
         mesh.Freeze(); return mesh;
         Point3D Stretch(Point3D p) => new(x+p.X*rx,y+p.Y*ry,z+p.Z*rz);
+    }
+
+    /// <summary>A frozen shared unit sphere. Reuse it with model transforms for small rounded scenery.</summary>
+    internal static MeshGeometry3D SmoothUnitSphere(int detail = 2)
+    {
+        if (detail is < 0 or > 4) throw new ArgumentOutOfRangeException(nameof(detail));
+        return SmoothSphereCache.GetOrAdd(detail, d => SmoothEllipsoid(0, 0, 0, 1, 1, 1, d));
+    }
+
+    /// <summary>Smooth ellipsoid with analytic gradient normals, including nonuniform axis scaling.</summary>
+    internal static MeshGeometry3D SmoothEllipsoid(double x, double y, double z,
+        double rx, double ry, double rz, int detail = 2)
+    {
+        CheckDimensions(rx, ry, rz);
+        CheckFinite(new Point3D(x, y, z));
+        var mesh = new MeshGeometry3D();
+        foreach (var (a, b, c) in SphereFaces(detail))
+            AppendSmoothTriangle(mesh, Stretch(a), Stretch(b), Stretch(c), Normal(a), Normal(b), Normal(c));
+        mesh.Freeze();
+        return mesh;
+
+        Point3D Stretch(Point3D p) => new(x + p.X * rx, y + p.Y * ry, z + p.Z * rz);
+        // For q=(rx*u.x, ry*u.y, rz*u.z), grad(sum(q_i/r_i)^2) is proportional to u_i/r_i.
+        Vector3D Normal(Point3D unit) => NormalizeChecked(new Vector3D(unit.X / rx, unit.Y / ry, unit.Z / rz));
+    }
+
+    /// <summary>
+    /// Append a spherical triangle with radial vertex normals. The sphere is centered at the origin
+    /// unless center is supplied. Inward input winding is corrected; the caller freezes the combined mesh.
+    /// </summary>
+    internal static void SmoothTriangle(MeshGeometry3D mesh, Point3D a, Point3D b, Point3D c,
+        Point3D? center = null)
+    {
+        var origin = center ?? new Point3D();
+        CheckFinite(origin);
+        AppendSmoothTriangle(mesh, a, b, c, NormalizeChecked(a - origin), NormalizeChecked(b - origin),
+            NormalizeChecked(c - origin));
+    }
+
+    /// <summary>A smooth ring tube around the local Y axis. The major radius exceeds the tube radius.</summary>
+    internal static MeshGeometry3D Torus(double x, double y, double z, double radius, double tubeRadius,
+        int segments = 32, int tubeSegments = 10)
+    {
+        CheckFinite(new Point3D(x, y, z));
+        CheckDimensions(radius, tubeRadius);
+        if (tubeRadius >= radius) throw new ArgumentOutOfRangeException(nameof(tubeRadius));
+        if (segments is < 3 or > 128) throw new ArgumentOutOfRangeException(nameof(segments));
+        if (tubeSegments is < 3 or > 32) throw new ArgumentOutOfRangeException(nameof(tubeSegments));
+        var mesh = new MeshGeometry3D();
+        for (var i = 0; i < segments; i++)
+        for (var j = 0; j < tubeSegments; j++)
+        {
+            var a = Vertex(i, j);
+            var b = Vertex(i, j + 1);
+            var c = Vertex(i + 1, j + 1);
+            var d = Vertex(i + 1, j);
+            AppendSmoothTriangle(mesh, a.Position, b.Position, c.Position, a.Normal, b.Normal, c.Normal);
+            AppendSmoothTriangle(mesh, a.Position, c.Position, d.Position, a.Normal, c.Normal, d.Normal);
+        }
+        mesh.Freeze();
+        return mesh;
+
+        (Point3D Position, Vector3D Normal) Vertex(int i, int j)
+        {
+            // Modulo closes the seam with numerically identical positions and normals.
+            var around = (i % segments) * 2 * Math.PI / segments;
+            var tube = (j % tubeSegments) * 2 * Math.PI / tubeSegments;
+            var ca = Math.Cos(around); var sa = Math.Sin(around);
+            var ct = Math.Cos(tube); var st = Math.Sin(tube);
+            return (new Point3D(x + (radius + tubeRadius * ct) * ca, y + tubeRadius * st,
+                    z + (radius + tubeRadius * ct) * sa), new Vector3D(ct * ca, st, ct * sa));
+        }
     }
 
     internal static MeshGeometry3D Frustum(double bottomRadius, double topRadius, double height, int sides = 7, double y = 0)
@@ -88,6 +163,45 @@ internal static class PlanetView3DGeometry
     {
         var n=Vector3D.CrossProduct(b-a,c-a); if(n.LengthSquared<1e-20) throw new ArgumentException("Degenerate triangle."); n.Normalize();
         int start=mesh.Positions.Count; foreach(var p in new[]{a,b,c}) {mesh.Positions.Add(p);mesh.Normals.Add(n);mesh.TriangleIndices.Add(start++);}
+    }
+
+    private static void AppendSmoothTriangle(MeshGeometry3D mesh, Point3D a, Point3D b, Point3D c,
+        Vector3D na, Vector3D nb, Vector3D nc)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        if (mesh.IsFrozen) throw new InvalidOperationException("Cannot append to a frozen mesh.");
+        if (mesh.Positions.Count != mesh.Normals.Count)
+            throw new ArgumentException("Existing positions and normals must have matching counts.", nameof(mesh));
+        CheckFinite(a); CheckFinite(b); CheckFinite(c);
+        var face = Vector3D.CrossProduct(b - a, c - a);
+        if (!double.IsFinite(face.LengthSquared) || face.LengthSquared < 1e-20)
+            throw new ArgumentException("Degenerate or non-finite triangle.");
+        na = NormalizeChecked(na); nb = NormalizeChecked(nb); nc = NormalizeChecked(nc);
+        var facing = Vector3D.DotProduct(face, na + nb + nc);
+        if (!double.IsFinite(facing) || Math.Abs(facing) < 1e-15)
+            throw new ArgumentException("Triangle has no consistent outward direction.");
+        if (facing < 0) { (b, c) = (c, b); (nb, nc) = (nc, nb); }
+        var start = mesh.Positions.Count;
+        mesh.Positions.Add(a); mesh.Positions.Add(b); mesh.Positions.Add(c);
+        mesh.Normals.Add(na); mesh.Normals.Add(nb); mesh.Normals.Add(nc);
+        mesh.TriangleIndices.Add(start); mesh.TriangleIndices.Add(start + 1); mesh.TriangleIndices.Add(start + 2);
+    }
+
+    private static void CheckFinite(Point3D point)
+    {
+        if (!double.IsFinite(point.X) || !double.IsFinite(point.Y) || !double.IsFinite(point.Z))
+            throw new ArgumentOutOfRangeException(nameof(point), "Coordinates must be finite.");
+    }
+
+    private static Vector3D NormalizeChecked(Vector3D vector)
+    {
+        if (!double.IsFinite(vector.X) || !double.IsFinite(vector.Y) || !double.IsFinite(vector.Z) ||
+            (vector.X == 0 && vector.Y == 0 && vector.Z == 0))
+            throw new ArgumentException("A surface normal must be finite and nonzero.");
+        vector.Normalize();
+        if (!double.IsFinite(vector.X) || !double.IsFinite(vector.Y) || !double.IsFinite(vector.Z))
+            throw new ArgumentException("A surface normal could not be normalized.");
+        return vector;
     }
     private static Point3D Unit(Point3D p) {var v=(Vector3D)p;v.Normalize();return (Point3D)v;}
     private static Point3D Mid(Point3D a,Point3D b)=>Unit((Point3D)(((Vector3D)a+(Vector3D)b)/2));

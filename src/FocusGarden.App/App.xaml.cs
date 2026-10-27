@@ -26,7 +26,7 @@ public partial class App : Application
             {
                 var content = (FrameworkElement)MainWindow.Content;
                 content.Measure(new Size(1280, 940)); content.Arrange(new Rect(0, 0, 1280, 940)); content.UpdateLayout();
-                File.WriteAllText(Path.Combine(DataDirectory, "installation-check.json"), System.Text.Json.JsonSerializer.Serialize(new { Product = "专注星球", Version = "0.4.0", Ready = true, MainWindow.Title, Framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription }));
+                File.WriteAllText(Path.Combine(DataDirectory, "installation-check.json"), System.Text.Json.JsonSerializer.Serialize(new { Product = "专注星球", Version = "0.5.0", Ready = true, MainWindow.Title, Framework = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription }));
                 MainWindow.Close(); Shutdown(); return;
             }
             MainWindow.Show();
