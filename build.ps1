@@ -10,7 +10,7 @@ if ((Test-Path -LiteralPath $Destination -PathType Container) -and @(Get-ChildIt
     throw '输出目录不是空目录。请指定一个新的或空的目录，以免混入旧版本 DLL；脚本不会删除已有文件。'
 }
 $verificationArtifacts = Join-Path $WorkDirectory 'verification'
-foreach ($testProject in @('FocusGarden.Core.Tests', 'FocusGarden.Upgrade.Tests', 'FocusGarden.PlanetLayout.Tests', 'FocusGarden.PlanetGrowth.Tests', 'FocusGarden.PlanetGeometry.Tests', 'FocusGarden.PlanetView.Tests', 'FocusGarden.PlanetIntegration.Tests', 'FocusGarden.Packaging.Tests', 'FocusGarden.StrictFocus.Tests', 'FocusGarden.Timing.Tests')) {
+foreach ($testProject in @('FocusGarden.Core.Tests', 'FocusGarden.Upgrade.Tests', 'FocusGarden.PlanetLayout.Tests', 'FocusGarden.PlanetGrowth.Tests', 'FocusGarden.PlanetGeometry.Tests', 'FocusGarden.PlanetView.Tests', 'FocusGarden.PlanetIntegration.Tests', 'FocusGarden.Packaging.Tests', 'FocusGarden.StrictFocus.Tests', 'FocusGarden.Timing.Tests', 'FocusGarden.Usage.Tests', 'FocusGarden.Calendar.Tests', 'FocusGarden.Codex.Tests', 'FocusGarden.Appearance.Tests', 'FocusGarden.Bridge.Tests')) {
     dotnet build (Join-Path $PSScriptRoot "tests/$testProject/$testProject.csproj") -c Release --artifacts-path $verificationArtifacts --nologo
     if ($LASTEXITCODE -ne 0) { throw "数据保护检查构建失败，已停止发布：$testProject" }
     dotnet (Join-Path $verificationArtifacts "bin/$testProject/release/$testProject.dll")

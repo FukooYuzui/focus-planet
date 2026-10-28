@@ -18,3 +18,6 @@ public sealed record FocusSession(
     int PlannedSeconds,
     int ElapsedSeconds,
     string Status);
+
+public sealed record FocusStatisticsSnapshot(int Year, DateTime Today, Dictionary<string, int> Daily,
+    int TodaySeconds, int CompletedCount, IReadOnlyList<FocusSession> Latest);

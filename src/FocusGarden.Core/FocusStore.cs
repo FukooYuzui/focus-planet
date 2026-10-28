@@ -251,6 +251,41 @@ public sealed class FocusStore : IDisposable
         }
     }
 
+    public Dictionary<string, int> GetDailyTotalsSince(DateTime date)
+    {
+        lock (_gate)
+        {
+            CheckDisposed();
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT day,SUM(seconds) FROM session_days WHERE day >= $start GROUP BY day ORDER BY day";
+            command.Parameters.AddWithValue("$start", date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+            using var reader = command.ExecuteReader();
+            var result = new Dictionary<string, int>(StringComparer.Ordinal);
+            while (reader.Read()) result.Add(reader.GetString(0), reader.GetInt32(1));
+            return result;
+        }
+    }
+
+    /// <summary>Aggregate in SQLite; materialize only the twelve rows actually displayed.</summary>
+    public FocusStatisticsSnapshot GetStatistics(int year, DateTime today)
+    {
+        if (year is < 1 or >= 9999) throw new ArgumentOutOfRangeException(nameof(year));
+        lock (_gate)
+        {
+            CheckDisposed();
+            var daily = GetDailyTotals(year);
+            var current = year == today.Year ? daily : GetDailyTotals(today.Year);
+            current.TryGetValue(today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), out var todaySeconds);
+            using var count = _connection.CreateCommand();
+            count.CommandText = "SELECT COUNT(*) FROM sessions WHERE status='completed' AND julianday(ended_at)>=julianday($start) AND julianday(ended_at)<julianday($end)";
+            var start = new DateTime(year, 1, 1, 0, 0, 0, DateTimeKind.Local);
+            count.Parameters.AddWithValue("$start", Format(new DateTimeOffset(start)));
+            count.Parameters.AddWithValue("$end", Format(new DateTimeOffset(start.AddYears(1))));
+            var completed = Convert.ToInt32(count.ExecuteScalar());
+            return new(year, today.Date, daily, todaySeconds, completed, GetSessions(12));
+        }
+    }
+
     private static IEnumerable<KeyValuePair<string, int>> AllocateLocalDays(DateTimeOffset start, int seconds)
     {
         var end = start.AddSeconds(seconds);

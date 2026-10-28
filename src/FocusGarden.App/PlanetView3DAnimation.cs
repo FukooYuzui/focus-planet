@@ -9,7 +9,7 @@ internal sealed partial class PlanetView3D
 {
     private sealed class SceneActor(PlanetSceneMotion definition)
     {
-        internal readonly PlanetSceneMotion Definition=definition;
+        internal PlanetSceneMotion Definition=definition;
         internal readonly TranslateTransform3D Offset=new();
         internal readonly AxisAngleRotation3D Turn=new(new(0,1,0),0);
         internal readonly AxisAngleRotation3D Lean=new(new(0,0,1),0);

@@ -26,7 +26,6 @@ internal sealed partial class PlanetView3D : UserControl
     private Point pointer;
     private Point pressPointer;
     private bool editMode;
-    private int layoutRevision,renderedLayoutRevision=-1;
     private PlanetBuildingPlacement[] buildings=[];
     private IReadOnlyDictionary<GeometryModel3D,int> plotHits=new Dictionary<GeometryModel3D,int>();
     private readonly List<SceneActor> motions=[];
@@ -44,7 +43,7 @@ internal sealed partial class PlanetView3D : UserControl
     public int? SelectedPlotId {get;private set;}
     public event Action<int>? PlotClicked;
 
-    public PlanetView3D()
+    public PlanetView3D(bool deferInitialScene=false)
     {
         MinHeight=300;Focusable=false;Foreground=Brush("#F2F6F5");
         var root=new Grid { Background=StarBrush(),ClipToBounds=true };
@@ -75,46 +74,11 @@ internal sealed partial class PlanetView3D : UserControl
         animation.Tick+=(_,_)=>{if(!IsSceneInView()){animation.Stop();return;}AnimationTickCount++;animationSeconds+=.12;AnimateScene(animationSeconds);if(focusing&&!surfaceView)yawRotation.Angle=(yawRotation.Angle+.045)%360;};
         Loaded+=(_,_)=>{AttachVisibilityHost();UpdateAnimation();};IsVisibleChanged+=(_,_)=>UpdateAnimation();
         Unloaded+=(_,_)=>{animation.Stop();DetachVisibilityHost();if(viewport.IsMouseCaptured)viewport.ReleaseMouseCapture();};
-        SetState(0,"clear",false,false);
+        if(!deferInitialScene)SetState(0,"clear",false,false);
     }
 
     private readonly Transform3DGroup planetTransform;
 
-    public void SetState(int level,string weather,bool isFocusing,bool isNight,int seed=20261027)
-    {
-        Dispatcher.VerifyAccess();
-        if(level is <0 or >5)throw new ArgumentOutOfRangeException(nameof(level));
-        if(weather is not ("clear" or "cloudy" or "rain" or "aurora"))throw new ArgumentException("天气应为 clear、cloudy、rain 或 aurora。",nameof(weather));
-        focusing=isFocusing;
-        if(currentLevel!=level||currentWeather!=weather||night!=isNight||currentSeed!=seed||layoutRevision!=renderedLayoutRevision)
-        {
-            var built=PlanetView3DScene.Build(level,weather,isNight,seed,buildings,editMode,SelectedPlotId??-1);FeatureCounts=built.Features;plotHits=built.PlotHits;
-            var world=new Model3DGroup();
-            world.Children.Add(new AmbientLight(isNight?Color.FromRgb(70,86,105):Color.FromRgb(133,143,140)));
-            world.Children.Add(new DirectionalLight(isNight?Color.FromRgb(109,149,181):Color.FromRgb(255,245,216),new(-.7,-1,-1.6)));
-            world.Children.Add(new DirectionalLight(isNight?Color.FromRgb(62,101,117):Color.FromRgb(82,116,130),new(1,.3,.5)));
-            var body=new Model3DGroup {Transform=planetTransform};body.Children.Add(built.Model);motions.Clear();
-            foreach(var moving in built.Motions)
-            {
-                var actor=new SceneActor(moving);var transform=new Transform3DGroup();transform.Children.Add(new RotateTransform3D(actor.Lean));transform.Children.Add(new RotateTransform3D(actor.Turn));transform.Children.Add(actor.Offset);transform.Children.Add(actor.Surface);var group=new Model3DGroup {Transform=transform};group.Children.Add(moving.Model);body.Children.Add(group);motions.Add(actor);
-            }
-            AnimateScene(animationSeconds);world.Children.Add(body);scene.Content=world;
-            currentLevel=level;currentWeather=weather;night=isNight;currentSeed=seed;renderedLayoutRevision=layoutRevision;SceneBuildCount++;UpdateCamera();
-        }
-        string state=weather switch {"clear"=>"晴朗","cloudy"=>"云朵漫游","rain"=>"轻雨滋养",_=>"极光之夜"};
-        status.Text=$"Lv.{level}  ·  {state}  ·  {(isNight?"夜晚":"白昼")}{(editMode?$"  /  布置家园{(SelectedPlotId.HasValue?$" · 地块 {SelectedPlotId+1}":"")}":isFocusing?"  /  专注中":"")}";UpdateAnimation();
-    }
-
-    public void SetBuildings(IReadOnlyList<PlanetBuildingPlacement> placements)
-    {
-        Dispatcher.VerifyAccess();ArgumentNullException.ThrowIfNull(placements);
-        var snapshot=placements.ToArray();
-        if(snapshot.Any(p=>p is null||string.IsNullOrWhiteSpace(p.Id)||p.PlotId is <0 or >=32||p.QuarterTurns is <0 or >3||!PlanetLayoutCatalog.Entries.Any(d=>d.Kind==p.Kind))||snapshot.Select(p=>p.Id).Distinct(StringComparer.Ordinal).Count()!=snapshot.Length||snapshot.Select(p=>p.PlotId).Distinct().Count()!=snapshot.Length||snapshot.Count(p=>PlanetLayoutCatalog.IsAnimal(p.Kind))>PlanetLayoutCatalog.AnimalLimitPerPlanet)throw new ArgumentException("内容须使用唯一 ID 和地块，朝向为 0–3，生物最多 12 只。",nameof(placements));
-        snapshot=snapshot.OrderBy(p=>p.PlotId).ToArray();if(buildings.SequenceEqual(snapshot))return;buildings=snapshot;layoutRevision++;RefreshState();
-    }
-    public void SetEditMode(bool enabled){Dispatcher.VerifyAccess();if(editMode==enabled)return;editMode=enabled;if(!enabled)SelectedPlotId=null;layoutRevision++;RefreshState();}
-    public void SelectPlot(int? plotId){Dispatcher.VerifyAccess();if(plotId is <0 or >=32)throw new ArgumentOutOfRangeException(nameof(plotId));if(SelectedPlotId==plotId)return;SelectedPlotId=plotId;layoutRevision++;RefreshState();}
-    private void RefreshState()=>SetState(currentLevel,currentWeather,focusing,night,currentSeed);
     private void ClickPlot(Point point)
     {
         var found=HitTestPlot(point);

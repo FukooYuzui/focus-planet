@@ -15,6 +15,9 @@ namespace FocusGarden.App;
 public partial class MainWindow : Window
 {
     private readonly FocusStore store;
+    private readonly SerialWorkQueue focusWork = new();
+    private long focusDataRevision;
+    private long sessionEventGeneration;
     private readonly LocalBridge bridge;
     private readonly FocusAppearance appearance;
     private FocusSettings settings;
@@ -23,6 +26,11 @@ public partial class MainWindow : Window
     private long? sessionId;
     private bool breaking, confirming, shuttingDown, hotkeyRegistered;
     private bool activeStrictFocus, startingFocus;
+    private bool savingSettings, endingFocus, allowClose;
+    private Task progressTask = Task.CompletedTask, finishTask = Task.CompletedTask;
+    private Task exportTask = Task.CompletedTask;
+    private Task? closeTask;
+    private SessionWriter? sessionWriter;
     private Func<int, bool> strictStartConfirmation;
     private long lastTimestamp;
     private int plannedSeconds, year = DateTime.Now.Year;
@@ -59,10 +67,11 @@ public partial class MainWindow : Window
         SystemEvents.PowerModeChanged += PowerChanged;
         SystemEvents.SessionSwitch += SessionChanged;
         Closing += ClosingWindow;
-        Closed += (_, _) => { shuttingDown = true; timer.Stop(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); CloseDashboard(); ClosePlanet(); bridge.Dispose(); store.Dispose(); };
-        RefreshStatistics();
+        Closed += (_, _) => { shuttingDown = true; timer.Stop(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); bridge.Dispose(); };
         InitializeDashboard();
         InitializePlanet();
+        RefreshStatistics();
+        StateChanged += (_, _) => { if (WindowState != WindowState.Minimized) RefreshStatistics(); };
     }
     private nint WindowHook(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
     {
@@ -89,6 +98,8 @@ public partial class MainWindow : Window
         PageTitle.Text = page switch { "planet" => "把每一份投入，变成一个小世界。", "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
         PageSubtitle.Text = page switch { "planet" => "六个月的陪伴，从一颗荒凉星球出发。", "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；严格专注期间不能在程序内提前解除。", _ => "选一件小事，开始一段完整的专注。" };
         PageScroller.ScrollToTop();
+        if (page is "focus" or "stats") RefreshStatistics();
+        if (page == "focus" && dashboardReady) { RefreshUsageUi(); RefreshTokenUi(); }
     }
     private void ShowFocus(object sender, RoutedEventArgs e) { RefreshStatistics(); Page("focus"); }
     private void ShowStats(object sender, RoutedEventArgs e) { RefreshStatistics(); Page("stats"); }
@@ -129,8 +140,10 @@ public partial class MainWindow : Window
         catch (Exception ex) { Status("恢复纯色失败：" + ex.Message); }
     }
     private static string[] Lines(string text) => text.Split(['\r', '\n', ',', '，', ';'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-    private bool SaveAllSettings()
+    private async Task<bool> SaveAllSettings()
     {
+        if (savingSettings || shuttingDown) return false;
+        savingSettings = true;
         try
         {
             if (!int.TryParse(FocusMinutesInput.Text, out var focus) || focus < 1 || focus > 180) throw new ArgumentException("专注时长请输入 1–180 分钟。");
@@ -138,26 +151,30 @@ public partial class MainWindow : Window
             var apps = Lines(AppsInput.Text).Select(AppRules.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (apps.Any(n => NativeFocus.Protected.Contains(n))) throw new ArgumentException("不能限制系统桌面、任务管理器或专注星球等逃生应用。");
             var candidate = new FocusSettings { FocusMinutes = focus, BreakMinutes = rest, Immersive = ImmersiveCheck.IsChecked == true, StrictFocus = StrictFocusCheck.IsChecked == true, BlockedApps = apps, BlockedDomains = Lines(DomainsInput.Text).Select(DomainRules.Normalize).Distinct().ToArray() };
-            store.SaveSettings(candidate); settings = candidate;
+            await focusWork.RunAsync(() => store.SaveSettings(candidate)); settings = candidate;
             AppsInput.Text = string.Join(Environment.NewLine, settings.BlockedApps); DomainsInput.Text = string.Join(Environment.NewLine, settings.BlockedDomains);
             return true;
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "请检查设置", MessageBoxButton.OK, MessageBoxImage.Information); return false; }
+        finally { savingSettings = false; }
     }
-    private void SaveRules(object sender, RoutedEventArgs e)
+    private async void SaveRules(object sender, RoutedEventArgs e)
     {
-        if (clock != null) { Status("专注或休息期间不能修改设置，请在结束后保存。"); return; }
-        if (SaveAllSettings()) Status("设置已保存；下次专注时生效。");
+        if (clock != null || startingFocus || endingFocus || shuttingDown) { Status("请在本轮结束并保存后修改设置。"); return; }
+        if (await SaveAllSettings()) Status("设置已保存；下次专注时生效。");
     }
-    private void StartFocus(object sender, RoutedEventArgs e) => Begin(false);
-    private void StartTest(object sender, RoutedEventArgs e) { if (App.TestMode) Begin(true); }
-    private void Begin(bool shortTest)
+    private async void StartFocus(object sender, RoutedEventArgs e) => await Begin(false);
+    private async void StartTest(object sender, RoutedEventArgs e) { if (App.TestMode) await Begin(true); }
+    private async Task Begin(bool shortTest)
     {
-        if (clock != null || startingFocus) return;
+        if (clock != null || startingFocus || endingFocus || savingSettings || shuttingDown || travellingPlanet || desktopLocked || powerSuspended) return;
+        var generation = Volatile.Read(ref sessionEventGeneration);
         startingFocus = true;
+        SetupPanel.IsEnabled = false;
         try
         {
-            if (!SaveAllSettings()) return;
+            if (!await SaveAllSettings()) return;
+            if (StartWasInterrupted(generation)) return;
             plannedSeconds = shortTest ? 10 : settings.FocusMinutes * 60;
             // Capture the choice once: a session cannot unlock itself through later settings changes.
             var strictForSession = settings.StrictFocus;
@@ -166,9 +183,31 @@ public partial class MainWindow : Window
                 Status("已取消开始严格专注，尚未创建本轮记录或开启限制。");
                 return;
             }
+            if (StartWasInterrupted(generation)) return;
             currentTask = string.IsNullOrWhiteSpace(TaskInput.Text) ? "一段专注时间" : TaskInput.Text.Trim();
-            try { store.RecoverInterrupted(DateTimeOffset.Now); sessionId = store.BeginSession(currentTask, plannedSeconds, DateTimeOffset.Now); }
+            try
+            {
+                var task = currentTask; var duration = plannedSeconds; var started = DateTimeOffset.Now;
+                sessionId = await focusWork.RunAsync(() =>
+                {
+                    store.RecoverInterrupted(started);
+                    var id = store.BeginSession(task, duration, started);
+                    Interlocked.Increment(ref focusDataRevision); return id;
+                });
+                sessionWriter = new SessionWriter(sessionId.Value);
+            }
             catch (Exception ex) { Status("无法保存记录，未开启限制：" + ex.Message); return; }
+            if (StartWasInterrupted(generation))
+            {
+                var cancelledId = sessionId.Value;
+                sessionId = null; sessionWriter = null;
+                try
+                {
+                    await focusWork.RunAsync(() => { store.EndSession(cancelledId, "interrupted", DateTimeOffset.Now); Interlocked.Increment(ref focusDataRevision); });
+                }
+                catch (Exception error) { Status("开始已取消，零秒记录将在下次启动恢复为中断：" + error.Message); }
+                return;
+            }
             clock = new FocusClock(plannedSeconds); breaking = false; activeStrictFocus = strictForSession;
             lastTimestamp = Stopwatch.GetTimestamp(); nextHeatmapRefresh = 30;
             SessionLabel.Text = activeStrictFocus ? "严格专注中 · 倒计时结束后恢复退出" : shortTest ? "10 秒验收 · 使用独立测试记录" : "正在专注 · 一次只做一件事";
@@ -177,7 +216,7 @@ public partial class MainWindow : Window
             Status(activeStrictFocus ? "严格专注已开始；本轮程序内提前退出已禁用，计时结束后恢复。" : settings.BlockedDomains.Length > 0 ? "专注已开始；网站限制需要已连接的浏览器扩展。" : hotkeyRegistered ? "专注已开始；Ctrl + Alt + Esc 可立即退出。" : "专注已开始；可使用紧急退出按钮（快捷键被占用）。");
             if (settings.Immersive) EnterFullscreen();
         }
-        finally { startingFocus = false; }
+        finally { startingFocus = false; if (clock == null) SetActiveUi(false); }
     }
     private bool ConfirmStrictStart(int seconds)
     {
@@ -186,12 +225,18 @@ public partial class MainWindow : Window
             $"本轮将专注 {duration}。\n\n开始后，紧急退出按钮、Esc、Ctrl + Alt + Esc 和关闭窗口均不能提前结束，设置也不能中途修改。倒计时结束后自动恢复。\n\nWindows 任务管理器、注销和关机仍可使用；锁屏、休眠或异常时会中断并保留已保存的时长。\n\n现在开始严格专注？",
             "确认开始严格专注", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No) == MessageBoxResult.Yes;
     }
-    private void StartBreak(object sender, RoutedEventArgs e)
+    private async void StartBreak(object sender, RoutedEventArgs e)
     {
-        if (clock != null || startingFocus || !SaveAllSettings()) return;
+        if (clock != null || startingFocus || endingFocus || savingSettings || shuttingDown || travellingPlanet || desktopLocked || powerSuspended) return;
+        var generation = Volatile.Read(ref sessionEventGeneration);
+        startingFocus = true;
+        try {
+        if (!await SaveAllSettings()) return;
+        if (StartWasInterrupted(generation)) return;
         plannedSeconds = settings.BreakMinutes * 60; breaking = true; activeStrictFocus = false; clock = new FocusClock(plannedSeconds); lastTimestamp = Stopwatch.GetTimestamp();
         SessionLabel.Text = "休息时间 · 起身走动，看看远处";
         SetActiveUi(true); FullscreenButton.Visibility = Visibility.Collapsed; UpdateTimer(); Status("休息不计入专注记录，也不启用使用限制。");
+        } finally { startingFocus = false; if (clock == null) SetActiveUi(false); }
     }
     private void SetActiveUi(bool active)
     {
@@ -240,9 +285,16 @@ public partial class MainWindow : Window
         }
         if (progress > 0 && sessionId.HasValue)
         {
-            try { store.AddProgress(sessionId.Value, progress, DateTimeOffset.Now); }
-            catch (Exception ex) { ReleaseForError(); Status("记录写入失败，已解除限制。最后部分时长可能未保存：" + ex.Message); return; }
+            var writer = sessionWriter!; var intervalEnd = DateTimeOffset.Now;
+            var write = focusWork.RunAsync(() =>
+            {
+                if (writer.Failed) throw new IOException("本轮之前的保存失败，已停止继续累计。");
+                try { store.AddProgress(writer.Id, progress, intervalEnd); Interlocked.Increment(ref focusDataRevision); }
+                catch { writer.Failed = true; throw; }
+            });
+            progressTask = ObserveProgressAsync(write, writer);
         }
+        if (clock == null) return;
         UpdateTimer();
         if (clock.ElapsedSeconds >= nextHeatmapRefresh) { nextHeatmapRefresh = clock.ElapsedSeconds + 30; RefreshStatistics(); }
         if (clock.IsComplete) { Finish("completed", breaking ? "休息结束，可以开始下一段专注了。" : "这一段完成了。休息一下，再出发。"); return; }
@@ -285,27 +337,29 @@ public partial class MainWindow : Window
     {
         if (clock == null) return;
         var id = sessionId;
+        var writer = sessionWriter; sessionWriter = null;
         clock = null; sessionId = null; breaking = false; activeStrictFocus = false;
         bridge.Publish(false, [], 0);
         immersion?.Release(); immersion = null; SetActiveUi(false);
-        if (id.HasValue)
-        {
-            try { store.EndSession(id.Value, status, DateTimeOffset.Now); }
-            catch (Exception ex) { message += " 记录结束状态保存失败，下次启动将恢复为中断：" + ex.Message; }
-        }
         Title = $"专注星球 {App.CurrentVersion} · Focus Planet" + (App.TestMode ? " [独立验收模式]" : "");
         SessionLabel.Text = status == "completed" ? "完成一段，让专注慢慢生长。" : "下一次，继续从这里开始。";
-        Status(message); RefreshStatistics(); Activate();
+        if (id.HasValue)
+        {
+            endingFocus = true; StartButton.IsEnabled = false; BreakButton.IsEnabled = false; TestButton.IsEnabled = false;
+            Status(message + " 正在保存本轮记录…");
+            finishTask = SaveSessionEndAsync(id.Value, writer, status, message, DateTimeOffset.Now);
+        }
+        else { Status(message); RefreshStatistics(); }
+        Activate();
     }
     public void ReleaseForError()
     {
-        var id = sessionId;
-        clock = null; sessionId = null; breaking = false; activeStrictFocus = false;
-        bridge.Publish(false, [], 0); immersion?.Release(); immersion = null; SetActiveUi(false);
-        if (id.HasValue) { try { store.EndSession(id.Value, "interrupted", DateTimeOffset.Now); } catch { /* Next start recovers the last durable checkpoint. */ } }
+        if (clock != null) Finish("interrupted", "本轮已中断，限制已解除，已保存的时长保留。");
+        else { bridge.Publish(false, [], 0); immersion?.Release(); immersion = null; activeStrictFocus = false; }
     }
     private void PowerChanged(object sender, PowerModeChangedEventArgs e)
     {
+        if (e.Mode == PowerModes.Suspend) Interlocked.Increment(ref sessionEventGeneration);
         Dispatcher.BeginInvoke(() =>
         {
             if (e.Mode == PowerModes.Suspend) { powerSuspended = true; if (dashboardReady) usageTracker.IsSessionLocked = true; Finish("interrupted", "电脑进入休眠，本轮已中断并解除限制。"); }
@@ -314,6 +368,7 @@ public partial class MainWindow : Window
     }
     private void SessionChanged(object sender, SessionSwitchEventArgs e)
     {
+        if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff) Interlocked.Increment(ref sessionEventGeneration);
         Dispatcher.BeginInvoke(() =>
         {
             if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff) { desktopLocked = true; if (dashboardReady) usageTracker.IsSessionLocked = true; Finish("interrupted", "系统锁定或注销，本轮已中断。"); }
@@ -322,7 +377,11 @@ public partial class MainWindow : Window
     }
     private void ClosingWindow(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        if (clock != null && !shuttingDown) { e.Cancel = true; ConfirmEmergency(); }
+        if (allowClose) return;
+        e.Cancel = true;
+        if (clock != null) { ConfirmEmergency(); return; }
+        if (startingFocus || savingSettings) { Status("正在保存设置，请稍后关闭。"); return; }
+        if (closeTask == null || closeTask.IsCompleted) closeTask = CloseFromRequestAsync();
     }
     private void RefreshApps(object sender, RoutedEventArgs e) => RefreshAppList();
     private void RefreshAppList()
@@ -355,18 +414,18 @@ public partial class MainWindow : Window
     }
     private void PreviousYear(object sender, RoutedEventArgs e) { if (year > 2000) year--; RefreshStatistics(); }
     private void NextYear(object sender, RoutedEventArgs e) { if (year < DateTime.Now.Year) year++; RefreshStatistics(); }
-    private void RefreshStatistics()
+    private void ApplyStatistics(FocusStatisticsSnapshot snapshot)
     {
-        var daily = store.GetDailyTotals(year); var todayTotals = year == DateTime.Now.Year ? daily : store.GetDailyTotals(DateTime.Now.Year);
-        todayTotals.TryGetValue(DateTime.Now.ToString("yyyy-MM-dd"), out var today);
-        var sessions = store.GetSessions(100000);
+        var daily = snapshot.Daily; var today = snapshot.TodaySeconds; var sessions = snapshot.Latest;
         TodayStat.Text = $"{today / 60.0:0.#} 分钟";
-        CompletedStat.Text = sessions.Count(s => s.Status == "completed" && s.EndedAt?.ToLocalTime().Year == year).ToString();
+        CompletedStat.Text = snapshot.CompletedCount.ToString();
         DaysStat.Text = daily.Count(d => d.Value > 0) + " 天";
         YearLabel.Text = year.ToString(); YearSummary.Text = $"{year} 年累计 {daily.Values.Sum() / 3600.0:0.#} 小时 · 每一格是一天";
         StatsYearSummary.Text = $"当前统计年份：{year}。年度热力图和年份切换位于番茄钟主页。";
         DrawHeatmap(daily);
-        RefreshPlanet();
+        if (historyRendered && renderedHistory.SequenceEqual(sessions)) return;
+        historyRendered = true;
+        renderedHistory = sessions.ToArray();
         HistoryPanel.Children.Clear();
         var latest = sessions.Take(12).ToArray();
         if (latest.Length == 0) HistoryPanel.Children.Add(new TextBlock { Text = "还没有记录。完成第一段专注，让星球开始生长。", Foreground = (Brush)FindResource("Muted"), Margin = new Thickness(0, 8, 0, 18) });
@@ -381,6 +440,21 @@ public partial class MainWindow : Window
     private static string StatusName(string s) => s switch { "completed" => "已完成", "emergency" => "提前结束", "interrupted" => "中断", _ => "进行中" };
     private void DrawHeatmap(Dictionary<string, int> daily)
     {
+        if (heatmapYear == year)
+        {
+            foreach (var (date, box) in heatmapCells)
+            {
+                daily.TryGetValue(date, out var seconds);
+                if (heatmapValues.TryGetValue(date, out var previous) && previous == seconds && heatmapToday == DateTime.Today) continue;
+                var day = DateTime.ParseExact(date, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                box.Background = HeatmapBrush(seconds);
+                box.ToolTip = $"{day:yyyy-MM-dd} · {seconds / 60.0:0.##} 分钟";
+                box.Opacity = day > DateTime.Today ? .35 : 1;
+                heatmapValues[date] = seconds;
+            }
+            heatmapToday = DateTime.Today; return;
+        }
+        heatmapYear = year; heatmapToday = DateTime.Today; heatmapCells.Clear(); heatmapValues.Clear();
         Heatmap.Children.Clear(); Heatmap.RowDefinitions.Clear(); Heatmap.ColumnDefinitions.Clear();
         var first = new DateTime(year, 1, 1); var offset = (int)first.DayOfWeek; var days = DateTime.IsLeapYear(year) ? 366 : 365; var weeks = (offset + days + 6) / 7;
         Heatmap.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(22) });
@@ -394,17 +468,40 @@ public partial class MainWindow : Window
             var date = first.AddDays(d); var col = (offset + d) / 7 + 1; var row = (offset + d) % 7 + 1;
             daily.TryGetValue(date.ToString("yyyy-MM-dd"), out var seconds); int level = seconds == 0 ? 0 : seconds < 1500 ? 1 : seconds < 3000 ? 2 : seconds < 6000 ? 3 : 4;
             var box = new Border { Width = 10, Height = 14, CornerRadius = new CornerRadius(2), Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(colors[level])), ToolTip = $"{date:yyyy-MM-dd} · {seconds / 60.0:0.##} 分钟", Opacity = date > DateTime.Today ? .35 : 1 };
+            heatmapCells[date.ToString("yyyy-MM-dd")] = box; heatmapValues[date.ToString("yyyy-MM-dd")] = seconds;
             Grid.SetColumn(box, col); Grid.SetRow(box, row); Heatmap.Children.Add(box);
             if (date.Day == 1) { var label = new TextBlock { Text = date.Month + "月", FontSize = 10, Foreground = (Brush)FindResource("Muted"), TextWrapping = TextWrapping.NoWrap }; Grid.SetColumn(label, col); Grid.SetColumnSpan(label, Math.Min(3, weeks - col + 1)); Heatmap.Children.Add(label); }
         }
     }
-    private void ExportCsv(object sender, RoutedEventArgs e)
+    private async void ExportCsv(object sender, RoutedEventArgs e)
     {
+        if (shuttingDown || !exportTask.IsCompleted) return;
         var dialog = new SaveFileDialog { FileName = "专注记录-" + DateTime.Now.ToString("yyyyMMdd") + ".csv", Filter = "CSV 文件|*.csv" };
         if (dialog.ShowDialog(this) != true) return;
+        if (shuttingDown) return;
+        exportTask = ExportRecordsAsync(dialog.FileName);
+        await exportTask;
+    }
+    private async Task ExportRecordsAsync(string path)
+    {
         static string Cell(string value) { if (value.Length > 0 && "=+-@\t\r".Contains(value[0])) value = "'" + value; return "\"" + value.Replace("\"", "\"\"") + "\""; }
-        var rows = new List<string> { "编号,任务,开始时间,结束时间,计划秒数,实际秒数,状态" };
-        rows.AddRange(store.GetSessions(100000).Select(s => string.Join(",", new[] { s.Id.ToString(), Cell(s.Task), Cell(s.StartedAt.ToString("O")), Cell(s.EndedAt?.ToString("O") ?? ""), s.PlannedSeconds.ToString(), s.ElapsedSeconds.ToString(), Cell(StatusName(s.Status)) })));
-        File.WriteAllLines(dialog.FileName, rows, new UTF8Encoding(true)); Status("已导出记录到：" + dialog.FileName);
+        try
+        {
+            var sessions = await focusWork.RunAsync(() => store.GetSessions(100000));
+            await Task.Run(() =>
+            {
+                var rows = new List<string> { "编号,任务,开始时间,结束时间,计划秒数,实际秒数,状态" };
+                rows.AddRange(sessions.Select(s => string.Join(",", new[] { s.Id.ToString(), Cell(s.Task), Cell(s.StartedAt.ToString("O")), Cell(s.EndedAt?.ToString("O") ?? ""), s.PlannedSeconds.ToString(), s.ElapsedSeconds.ToString(), Cell(StatusName(s.Status)) })));
+                var temporary = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, ".focus-export-" + Guid.NewGuid().ToString("N") + ".tmp");
+                try
+                {
+                    File.WriteAllLines(temporary, rows, new UTF8Encoding(true));
+                    File.Move(temporary, path, overwrite: true);
+                }
+                finally { if (File.Exists(temporary)) File.Delete(temporary); }
+            });
+            if (!shuttingDown) Status("已导出记录到：" + path);
+        }
+        catch (Exception ex) { if (!shuttingDown) Status("导出失败：" + ex.Message); }
     }
 }

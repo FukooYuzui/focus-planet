@@ -29,145 +29,138 @@ public partial class MainWindow
     private void InitializePlanet()
     {
         planetStore = new PlanetGrowthStore(Path.Combine(App.DataDirectory, "planet.db"));
-        planetStore.Initialize(DateTimeOffset.Now, store.GetAllDailyTotals());
+        var initialFocus = store.GetAllDailyTotals();
+        planetStore.Initialize(DateTimeOffset.Now, initialFocus);
         planetLayout = new PlanetLayoutStore(Path.Combine(App.DataDirectory, "planet-layout.db"));
-        planetView = new PlanetView3D();
+        planetView = new PlanetView3D(deferInitialScene: true);
         planetView.PlotClicked += PlanetPlotClicked;
         PlanetSceneHost.Content = planetView;
         PlanetRoadmapText.Text = "荒凉初生 → 森林萌芽（150 点）→ 生命栖息（1 个月 / 1,200 点）\n→ 定居家园（2 个月 / 3,000 点）→ 风能文明（3 个月 / 5,500 点）\n→ 星际绿洲（5 个月 / 9,000 点）→ 6 个月后可开拓新星球。\n阶段同时需要成长值和星龄。成长较慢时可以继续建设，没有到期清空。";
-        ReloadPlanetTokens(); RefreshPlanet();
-        Page("planet");
-    }
-
-    private void ReloadPlanetTokens()
-    {
-        if (planetStore == null || !dashboardReady || dashboardClosed) return;
-        var source = tokenImporter.ActiveSource;
-        if (source == null) return;
-        // Binding a different source clears its observation high-water. Never replay an old cache
-        // if the following query fails after that binding was persisted.
-        eligiblePlanetTokens = [];
+        // Initial construction precedes any token import or queued database work.
+        planetFocusTotals = new(initialFocus, StringComparer.Ordinal);
+        planetFocusRevision = Volatile.Read(ref focusDataRevision); planetFocusDate = DateTime.Today;
         var now = DateTimeOffset.Now;
-        var cutoff = planetStore.GetTokenPeriodStart(source, now);
-        eligiblePlanetTokens = tokenImporter.GetDailyTotalsSince(cutoff, now);
+        if (cachedTokenSource is { } source)
+            eligiblePlanetTokens = tokenImporter.GetDailyTotalsSince(planetStore.GetTokenPeriodStart(source, now), now);
+        var initial = ReadPlanetPresentation(planetStore.Update(now, initialFocus, eligiblePlanetTokens));
+        appliedPlanetTokenSource = cachedTokenSource;
+        RememberGrowthObservations(initialFocus, eligiblePlanetTokens, now);
+        Page("planet"); ApplyPlanetPresentation(initial, true);
     }
 
     private void PlanetTick()
     {
-        if (planetStore == null || shuttingDown) return;
+        if (planetStore == null || shuttingDown || planetClosed) return;
         PlanetClockText.Text = DateTime.Now.ToString("HH:mm:ss");
         PlanetFocusStatus.Text = clock == null ? "下一段专注，将成为这颗星球的养分。" : breaking ? "正在休息 · 小星球静静陪着你" : $"专注中  {FormatTime(clock.RemainingSeconds)} · {currentTask}";
+        if (cachedPlanetPresentation is { } cached && PlanetPage.Visibility == Visibility.Visible &&
+            (planetPresentationDirty || displayedPlanetId != cached.Snapshot.PlanetId || displayedPlanetLevel != cached.Snapshot.Level))
+            ApplyPlanetPresentation(cached, true);
         if (Stopwatch.GetElapsedTime(planetTick).TotalSeconds < 5) return;
         RefreshPlanet();
     }
 
-    private bool RefreshPlanet()
+    private void ApplyPlanetPresentation(PlanetPresentation presentation, bool force = false)
     {
-        if (planetStore == null || planetLayout == null || planetView == null || shuttingDown) return false;
-        planetTick = Stopwatch.GetTimestamp();
-        try
+        if (planetClosed || shuttingDown || planetView == null) return;
+        cachedPlanetPresentation = presentation;
+        planetSnapshot = presentation.Snapshot; planetBuildings = presentation.Buildings;
+        if (!force && PlanetPage.Visibility != Visibility.Visible && observationWindow == null) { planetPresentationDirty = true; return; }
+        planetPresentationDirty = false;
+        var s = presentation.Snapshot;
+        bool changedPlanet = displayedPlanetId != s.PlanetId;
+        bool changedLevel = displayedPlanetLevel != s.Level;
+        PlanetNameText.Text = s.Name;
+        PlanetLevelText.Text = $"Lv.{s.Level}  ·  {s.LevelName}  ·  星龄 {s.AgeDays + 1} 天";
+        PlanetWeatherText.Text = (s.Weather switch { "clear" => "晴朗", "cloudy" => "多云", "rain" => "轻雨", _ => "极光" }) + (s.IsNight ? " · 夜晚" : " · 白昼");
+        PlanetGrowthText.Text = $"累计 {s.TotalGrowth:N0} 点";
+        PlanetCycleText.Text = $"{s.ActivatedAt.ToLocalTime():yyyy.MM.dd} 启程  ·  {s.CycleEndsAt.ToLocalTime():yyyy.MM.dd} 开放探索";
+        long start = PlanetGrowthRules.LevelThresholds[s.Level];
+        PlanetGrowthProgress.Maximum = s.NextLevelAt.HasValue ? Math.Max(1, s.NextLevelAt.Value - start) : 1;
+        PlanetGrowthProgress.Value = s.NextLevelAt.HasValue ? Math.Clamp(s.TotalGrowth - start, 0, s.NextLevelAt.Value - start) : 1;
+        PlanetNextText.Text = s.NextLevelAt.HasValue
+            ? $"下一阶段：{PlanetGrowthRules.GetLevelName(s.Level + 1)} · 还需 {Math.Max(0, s.NextLevelAt.Value - s.TotalGrowth):N0} 点" + (s.NextLevelAvailableAt > DateTimeOffset.Now ? $" · {s.NextLevelAvailableAt.Value.ToLocalTime():yyyy.MM.dd} 起解锁" : "")
+            : "你的星球已成为星际绿洲。继续布置家园，或在周期结束后探索新世界。";
+        PlanetFocusPointsText.Text = $"+{s.TodayFocusPoints}";
+        PlanetTokenPointsText.Text = $"+{s.TodayTokenPoints}";
+        PlanetSynergyPointsText.Text = $"+{s.TodaySynergyPoints}";
+        PlanetFocusDetailText.Text = "新增专注 " + Duration(s.TodayFocusSeconds);
+        PlanetTokenDetailText.Text = "新增用量 " + TokenNumber(s.TodayTokens);
+        PlanetTodayGrowthText.Text = $"今日共 {s.TodayGrowth} 点 · 本星球 +{s.TodayPlanetGrowth}";
+        ExplorePlanetButton.IsEnabled = s.CanExplore && clock == null && !importingTokens;
+        PlanetExploreHint.Text = s.CanExplore ? "周期已满，可以启程。" : DateTimeOffset.Now < s.CycleEndsAt ? $"还需 {Math.Max(1, Math.Ceiling((s.CycleEndsAt - DateTimeOffset.Now).TotalDays))} 天" : "已从这颗星球启程过，可在档案中切换。";
+        if (changedPlanet)
         {
-            planetSnapshot = planetStore.Update(DateTimeOffset.Now, store.GetAllDailyTotals(), eligiblePlanetTokens);
-            var s = planetSnapshot;
-            bool changedPlanet = displayedPlanetId != s.PlanetId;
-            bool changedLevel = displayedPlanetLevel != s.Level;
-            PlanetNameText.Text = s.Name;
-            PlanetLevelText.Text = $"Lv.{s.Level}  ·  {s.LevelName}  ·  星龄 {s.AgeDays + 1} 天";
-            PlanetWeatherText.Text = (s.Weather switch { "clear" => "晴朗", "cloudy" => "多云", "rain" => "轻雨", _ => "极光" }) + (s.IsNight ? " · 夜晚" : " · 白昼");
-            PlanetGrowthText.Text = $"累计 {s.TotalGrowth:N0} 点";
-            PlanetCycleText.Text = $"{s.ActivatedAt.ToLocalTime():yyyy.MM.dd} 启程  ·  {s.CycleEndsAt.ToLocalTime():yyyy.MM.dd} 开放探索";
-            long start = PlanetGrowthRules.LevelThresholds[s.Level];
-            PlanetGrowthProgress.Maximum = s.NextLevelAt.HasValue ? Math.Max(1, s.NextLevelAt.Value - start) : 1;
-            PlanetGrowthProgress.Value = s.NextLevelAt.HasValue ? Math.Clamp(s.TotalGrowth - start, 0, s.NextLevelAt.Value - start) : 1;
-            PlanetNextText.Text = s.NextLevelAt.HasValue
-                ? $"下一阶段：{PlanetGrowthRules.GetLevelName(s.Level + 1)} · 还需 {Math.Max(0, s.NextLevelAt.Value - s.TotalGrowth):N0} 点" + (s.NextLevelAvailableAt > DateTimeOffset.Now ? $" · {s.NextLevelAvailableAt.Value.ToLocalTime():yyyy.MM.dd} 起解锁" : "")
-                : "你的星球已成为星际绿洲。继续布置家园，或在周期结束后探索新世界。";
-            PlanetFocusPointsText.Text = $"+{s.TodayFocusPoints}";
-            PlanetTokenPointsText.Text = $"+{s.TodayTokenPoints}";
-            PlanetSynergyPointsText.Text = $"+{s.TodaySynergyPoints}";
-            PlanetFocusDetailText.Text = "新增专注 " + Duration(s.TodayFocusSeconds);
-            PlanetTokenDetailText.Text = "新增用量 " + TokenNumber(s.TodayTokens);
-            PlanetTodayGrowthText.Text = $"今日共 {s.TodayGrowth} 点 · 本星球 +{s.TodayPlanetGrowth}";
-            ExplorePlanetButton.IsEnabled = s.CanExplore && clock == null && !importingTokens;
-            PlanetExploreHint.Text = s.CanExplore ? "周期已满，可以启程。" : DateTimeOffset.Now < s.CycleEndsAt ? $"还需 {Math.Max(1, Math.Ceiling((s.CycleEndsAt - DateTimeOffset.Now).TotalDays))} 天" : "已从这颗星球启程过，可在档案中切换。";
-            planetView.SetState(s.Level, s.Weather, clock != null && !breaking, s.IsNight, s.Seed);
-            if (changedPlanet)
-            {
-                displayedPlanetId = s.PlanetId;
-                PlanetNameInput.Text = s.Name;
-                selectedPlanetPlot = null; placingPlanetKind = null; movingPlanetBuilding = null;
-                PlanetSceneHost.Height = 650;
-                PlanetEditCheck.IsChecked = false; planetView.SetEditMode(false); planetView.ResetView();
-                RefreshPlanetBuildings(); RefreshPlanetSelector();
-            }
-            if (changedPlanet || changedLevel)
-            {
-                displayedPlanetLevel = s.Level;
-                var choice = PlanetBuildingChoice.SelectedValue as string;
-                PlanetBuildingChoice.ItemsSource = PlanetLayoutCatalog.Entries.Where(d => d.RequiredLevel <= s.Level)
-                    .OrderBy(d => d.Category switch { "建筑" => 0, "景观" => 1, _ => 2 })
-                    .Select(d => new BuildingChoice(d.Kind, $"{d.Category} · {d.Name}（{d.MaxCount}{(d.Category == "生物" ? "只" : "个")}）")).ToArray();
-                PlanetBuildingChoice.DisplayMemberPath = nameof(BuildingChoice.Label); PlanetBuildingChoice.SelectedValuePath = nameof(BuildingChoice.Kind);
-                PlanetBuildingChoice.SelectedValue = choice;
-                if (PlanetBuildingChoice.SelectedIndex < 0) PlanetBuildingChoice.SelectedIndex = 0;
-                if (s.Level == 0) PlanetLayoutHint.Text = "累计 150 点后解锁树木、花丛和更多景观；2 级迎来小动物。\n" + PlanetChoiceHint("rockgarden");
-            }
-            UpdatePlanetLayoutButtons();
-            return true;
+            displayedPlanetId = s.PlanetId;
+            PlanetNameInput.Text = s.Name;
+            selectedPlanetPlot = null; placingPlanetKind = null; movingPlanetBuilding = null;
+            PlanetSceneHost.Height = 650;
+            suppressPlanetEdit = true;
+            try { PlanetEditCheck.IsChecked = false; } finally { suppressPlanetEdit = false; }
+            planetView!.ResetView();
         }
-        catch (Exception ex) { Status("星球暂时无法更新，已有专注记录仍然保留：" + ex.Message); return false; }
+        if (changedPlanet || changedLevel)
+        {
+            displayedPlanetLevel = s.Level;
+            var choice = PlanetBuildingChoice.SelectedValue as string;
+            PlanetBuildingChoice.ItemsSource = PlanetLayoutCatalog.Entries.Where(d => d.RequiredLevel <= s.Level)
+                .OrderBy(d => d.Category switch { "建筑" => 0, "景观" => 1, _ => 2 })
+                .Select(d => new BuildingChoice(d.Kind, $"{d.Category} · {d.Name}（{d.MaxCount}{(d.Category == "生物" ? "只" : "个")}）")).ToArray();
+            PlanetBuildingChoice.DisplayMemberPath = nameof(BuildingChoice.Label); PlanetBuildingChoice.SelectedValuePath = nameof(BuildingChoice.Kind);
+            PlanetBuildingChoice.SelectedValue = choice;
+            if (PlanetBuildingChoice.SelectedIndex < 0) PlanetBuildingChoice.SelectedIndex = 0;
+            if (s.Level == 0) PlanetLayoutHint.Text = "累计 150 点后解锁树木、花丛和更多景观；2 级迎来小动物。\n" + PlanetChoiceHint("rockgarden");
+        }
+        planetView!.ApplyState(s.Level, s.Weather, clock != null && !breaking, s.IsNight, s.Seed,
+            planetBuildings, PlanetEditCheck.IsChecked == true, selectedPlanetPlot);
+        ApplyPlanetSelector(presentation.Planets);
+        UpdatePlanetLayoutButtons();
     }
 
-    private void RefreshPlanetBuildings()
+    private void ApplyPlanetSelector(IReadOnlyList<PlanetSummary> planets)
     {
-        if (planetSnapshot == null || planetLayout == null) return;
-        planetBuildings = planetLayout.GetBuildings(PlanetKey);
-        planetView?.SetBuildings(planetBuildings);
+        var choices = planets.Select(p => new PlanetChoice(p.PlanetId, $"{p.Name} · {p.TotalGrowth:N0} 点")).ToArray();
+        if (PlanetSelector.ItemsSource is not PlanetChoice[] previous || !previous.SequenceEqual(choices))
+        {
+            var selection = PlanetSelector.SelectedValue;
+            PlanetSelector.ItemsSource = choices;
+            PlanetSelector.DisplayMemberPath = nameof(PlanetChoice.Label); PlanetSelector.SelectedValuePath = nameof(PlanetChoice.Id);
+            PlanetSelector.SelectedValue = selection;
+        }
+        // Ordinary refresh must not overwrite an unsubmitted dropdown choice.
+        if (PlanetSelector.SelectedValue is not long || choices.All(c => c.Id != (long)PlanetSelector.SelectedValue))
+            PlanetSelector.SelectedValue = planetSnapshot!.PlanetId;
     }
 
-    private void RefreshPlanetSelector()
+    private void ShowPlanet(object sender, RoutedEventArgs e)
     {
-        if (planetStore == null || planetSnapshot == null) return;
-        PlanetSelector.ItemsSource = planetStore.ListPlanets().Select(p => new PlanetChoice(p.PlanetId, $"{p.Name} · {p.TotalGrowth:N0} 点")).ToArray();
-        PlanetSelector.DisplayMemberPath = nameof(PlanetChoice.Label); PlanetSelector.SelectedValuePath = nameof(PlanetChoice.Id);
-        PlanetSelector.SelectedValue = planetSnapshot.PlanetId;
+        Page("planet");
+        if (cachedPlanetPresentation is { } cached) ApplyPlanetPresentation(cached, true);
+        RefreshPlanet();
     }
-
-    private void ShowPlanet(object sender, RoutedEventArgs e) { RefreshPlanet(); Page("planet"); }
-    private void RenamePlanet(object sender, RoutedEventArgs e) => PlanetAction(() => { planetStore!.SetName(PlanetNameInput.Text); RefreshPlanet(); RefreshPlanetSelector(); Status("星球名字已保存。"); });
-    private async void SelectPlanet(object sender, RoutedEventArgs e)
+    private void RenamePlanet(object sender, RoutedEventArgs e)
     {
+        if (planetMutationPending || travellingPlanet) return;
+        var name = PlanetNameInput.Text;
+        planetActionTask = RunPlanetMutationAsync(() => planetStore!.SetName(name), () => Status("星球名字已保存。"));
+    }
+    private void SelectPlanet(object sender, RoutedEventArgs e)
+    {
+        if (planetMutationPending || travellingPlanet) return;
         if (clock != null || importingTokens) { Status("请在本轮结束、用量更新完成后切换星球，让助力准确入账。"); return; }
         if (PlanetSelector.SelectedValue is not long id) return;
-        await TravelPlanetAsync(() => { planetStore!.SelectPlanet(id); RefreshPlanet(); Status("已前往 " + planetSnapshot!.Name + "。后续成长将帮助当前星球。"); });
+        planetActionTask = TravelPlanetAsync(() => planetStore!.SelectPlanet(id));
     }
-    private async void ExplorePlanet(object sender, RoutedEventArgs e)
+    private void ExplorePlanet(object sender, RoutedEventArgs e)
     {
+        if (planetMutationPending || travellingPlanet) return;
         if (clock != null || importingTokens) { Status("请在本轮结束、用量更新完成后启程。"); return; }
-        await TravelPlanetAsync(() => { planetStore!.ExploreNewPlanet(DateTimeOffset.Now); RefreshPlanet(); Status("新星球已发现，旧家园保留在星球档案中。"); });
-    }
-    private async Task TravelPlanetAsync(Action travel)
-    {
-        if (travellingPlanet) return;
-        travellingPlanet = true;
-        try
-        {
-            // Settle outstanding local logs before changing which planet receives new growth.
-            if (tokenImporter.ActiveSource != null || Directory.Exists(dashboardPreferences.ResolveCodexHome()))
-            {
-                Status("启程前正在结算当前星球的专注和 Token 助力…");
-                if (!await ImportTokensAsync()) { if (!dashboardClosed) Status("用量未完整更新，本次仍留在原星球。请完成刷新后再次启程。"); return; }
-            }
-            if (shuttingDown || dashboardClosed) return;
-            if (clock != null) { Status("专注已开始，本次仍留在原星球。请在结束后启程。"); return; }
-            if (!RefreshPlanet()) { Status("星球助力未能保存，本次仍留在原星球。请检查数据目录后再试。"); return; }
-            PlanetAction(travel);
-        }
-        finally { travellingPlanet = false; }
+        planetActionTask = TravelPlanetAsync(() => planetStore!.ExploreNewPlanet(DateTimeOffset.Now));
     }
 
     private void TogglePlanetEdit(object sender, RoutedEventArgs e)
     {
+        if (suppressPlanetEdit || planetClosed) return;
         bool enabled = PlanetEditCheck.IsChecked == true;
         planetView?.SetEditMode(enabled);
         PlanetSceneHost.Height = 650;
@@ -207,6 +200,7 @@ public partial class MainWindow
     }
     private void StartPlanetPlacement(object sender, RoutedEventArgs e)
     {
+        if (planetMutationPending || travellingPlanet || planetClosed || shuttingDown) return;
         if (PlanetBuildingChoice.SelectedItem is not BuildingChoice choice) return;
         PlanetEditCheck.IsChecked = true; planetView?.SetEditMode(true);
         PlanetSceneHost.Height = 650;
@@ -215,59 +209,65 @@ public partial class MainWindow
         UpdatePlanetLayoutButtons();
     }
     private PlanetBuildingPlacement? SelectedPlanetBuilding => planetBuildings.FirstOrDefault(b => b.PlotId == selectedPlanetPlot);
-    private void PlanetPlotClicked(int plot) => PlanetAction(() =>
+    private void PlanetPlotClicked(int plot)
     {
-        if (planetSnapshot == null || PlanetEditCheck.IsChecked != true) return;
-        if (movingPlanetBuilding != null)
-        {
-            try { planetLayout!.Move(PlanetKey, movingPlanetBuilding, plot); }
-            catch { planetView?.SelectPlot(selectedPlanetPlot); throw; }
-            movingPlanetBuilding = null; selectedPlanetPlot = plot;
-            RefreshPlanetBuildings(); PlanetLayoutHint.Text = $"已移动到 {plot + 1} 号地块，布局已保存。";
-        }
-        else if (placingPlanetKind != null)
-        {
-            try { planetLayout!.Place(PlanetKey, placingPlanetKind, plot, planetSnapshot.Level); }
-            catch { planetView?.SelectPlot(selectedPlanetPlot); throw; }
-            placingPlanetKind = null; selectedPlanetPlot = plot;
-            RefreshPlanetBuildings(); PlanetLayoutHint.Text = $"已放置在 {plot + 1} 号地块，布局已保存。";
-        }
+        if (planetMutationPending || travellingPlanet || planetClosed || shuttingDown || planetSnapshot == null || PlanetEditCheck.IsChecked != true) return;
+        var key = PlanetKey; var level = planetSnapshot.Level;
+        if (movingPlanetBuilding is { } moving)
+            planetActionTask = RunPlanetMutationAsync(() => planetLayout!.Move(key, moving, plot), () =>
+            {
+                movingPlanetBuilding = null; selectedPlanetPlot = plot; planetView?.SelectPlot(plot);
+                PlanetLayoutHint.Text = $"已移动到 {plot + 1} 号地块，布局已保存。";
+            });
+        else if (placingPlanetKind is { } placing)
+            planetActionTask = RunPlanetMutationAsync(() => planetLayout!.Place(key, placing, plot, level), () =>
+            {
+                placingPlanetKind = null; selectedPlanetPlot = plot; planetView?.SelectPlot(plot);
+                PlanetLayoutHint.Text = $"已放置在 {plot + 1} 号地块，布局已保存。";
+            });
         else
         {
-            selectedPlanetPlot = plot;
+            selectedPlanetPlot = plot; planetView?.SelectPlot(plot);
             var building = SelectedPlanetBuilding;
             PlanetLayoutHint.Text = building == null ? $"已选择 {plot + 1} 号空地块。选择内容并点击“放置”。" : $"已选中 {PlanetLayoutCatalog.Entries.First(d => d.Kind == building.Kind).Name} · {plot + 1} 号地块 · 朝向 {building.QuarterTurns * 90}°\n" + PlanetChoiceHint(building.Kind);
+            UpdatePlanetLayoutButtons();
         }
-        UpdatePlanetLayoutButtons();
-    });
+    }
     private void MovePlanetBuilding(object sender, RoutedEventArgs e)
     {
+        if (planetMutationPending || travellingPlanet || planetClosed || shuttingDown) return;
         if (SelectedPlanetBuilding is not { } building) return;
         movingPlanetBuilding = building.Id; placingPlanetKind = null;
         PlanetLayoutHint.Text = "移动选中内容：点击一个空地块。原位置会保留到移动成功。";
     }
-    private void RotatePlanetBuilding(object sender, RoutedEventArgs e) => PlanetAction(() =>
+    private void RotatePlanetBuilding(object sender, RoutedEventArgs e)
     {
+        if (planetMutationPending || travellingPlanet) return;
         if (SelectedPlanetBuilding is not { } building) return;
-        var rotated = planetLayout!.Rotate(PlanetKey, building.Id); RefreshPlanetBuildings();
-        PlanetLayoutHint.Text = $"朝向已旋转为 {rotated.QuarterTurns * 90}°，布局已保存。";
-    });
-    private void RemovePlanetBuilding(object sender, RoutedEventArgs e) => PlanetAction(() =>
+        var key = PlanetKey;
+        planetActionTask = RunPlanetMutationAsync(() => planetLayout!.Rotate(key, building.Id), () =>
+        {
+            var rotated = planetBuildings.FirstOrDefault(b => b.Id == building.Id);
+            PlanetLayoutHint.Text = $"朝向已旋转为 {rotated?.QuarterTurns * 90}°，布局已保存。";
+        });
+    }
+    private void RemovePlanetBuilding(object sender, RoutedEventArgs e)
     {
+        if (planetMutationPending || travellingPlanet) return;
         if (SelectedPlanetBuilding is not { } building) return;
-        planetLayout!.Remove(PlanetKey, building.Id); movingPlanetBuilding = null; placingPlanetKind = null;
-        RefreshPlanetBuildings(); UpdatePlanetLayoutButtons(); PlanetLayoutHint.Text = "已收起，之后可重新放置，不消耗成长值。";
-    });
+        var key = PlanetKey;
+        planetActionTask = RunPlanetMutationAsync(() => planetLayout!.Remove(key, building.Id), () =>
+        {
+            movingPlanetBuilding = null; placingPlanetKind = null;
+            PlanetLayoutHint.Text = "已收起，之后可重新放置，不消耗成长值。";
+        });
+    }
     private void UpdatePlanetLayoutButtons()
     {
-        var editing = PlanetEditCheck.IsChecked == true;
-        PlanetPlaceButton.IsEnabled = PlanetBuildingChoice.Items.Count > 0;
+        var editing = PlanetEditCheck.IsChecked == true && !planetMutationPending && !travellingPlanet;
+        PlanetEditCheck.IsEnabled = PlanetBuildingChoice.IsEnabled = !planetMutationPending && !travellingPlanet;
+        PlanetPlaceButton.IsEnabled = !planetMutationPending && !travellingPlanet && PlanetBuildingChoice.Items.Count > 0;
         PlanetMoveButton.IsEnabled = PlanetRotateButton.IsEnabled = PlanetRemoveButton.IsEnabled = editing && SelectedPlanetBuilding != null;
-    }
-    private void PlanetAction(Action action)
-    {
-        try { action(); }
-        catch (Exception ex) { PlanetLayoutHint.Text = ex.Message; Status(ex.Message); }
     }
     private void ExpandPlanetView(object sender, RoutedEventArgs e)
     {
@@ -310,7 +310,6 @@ public partial class MainWindow
         };
         return expanded;
     }
-    private void ClosePlanet() { observationWindow?.Close(); planetLayout?.Dispose(); planetStore?.Dispose(); }
     private sealed record BuildingChoice(string Kind, string Label) { public override string ToString() => Label; }
     private sealed record PlanetChoice(long Id, string Label) { public override string ToString() => Label; }
 }

@@ -32,7 +32,7 @@ internal sealed class TokenCalendar3D : UserControl
     internal int SceneBuildCount { get; private set; }
     internal int RenderedDayCount => hitDays.Count;
 
-    public TokenCalendar3D()
+    public TokenCalendar3D(bool deferInitialScene = false)
     {
         Background = Brush("#0C1516"); Foreground = Brushes.White;
         MinHeight = 340;
@@ -73,7 +73,7 @@ internal sealed class TokenCalendar3D : UserControl
             UpdateCamera(); e.Handled = true;
         };
         Unloaded += (_, _) => { dayTip.IsOpen = false; if (viewport.IsMouseCaptured) viewport.ReleaseMouseCapture(); };
-        SetData(currentYear, new Dictionary<string, long>());
+        if (!deferInitialScene) SetData(currentYear, new Dictionary<string, long>());
     }
 
     public void SetData(int year, IReadOnlyDictionary<string, long> dailyTotals)

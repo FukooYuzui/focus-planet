@@ -6,7 +6,10 @@ namespace FocusGarden.App;
 
 internal sealed record PlanetSceneMotion(Model3DGroup Model,Transform3D Surface,string Kind,
     string Species,Vector3D Home,Vector3D Destination,string? Habitat,double Radius,double Heading,double Phase);
-internal sealed record PlanetScene(Model3DGroup Model, IReadOnlyDictionary<string, int> Features, IReadOnlyDictionary<GeometryModel3D,int> PlotHits,IReadOnlyList<PlanetSceneMotion> Motions);
+internal sealed record PlanetScene(Model3DGroup Model, IReadOnlyDictionary<string, int> Features, IReadOnlyDictionary<GeometryModel3D,int> PlotHits,IReadOnlyList<PlanetSceneMotion> Motions)
+{
+    internal IReadOnlyList<(string Kind,Vector3D Normal)> Habitats {get;init;}=[];
+}
 
 internal static partial class PlanetView3DScene
 {
@@ -98,7 +101,7 @@ internal static partial class PlanetView3DScene
         }
         // Local window light is subtle during the day and brighter against the night lighting.
         ResolveHabitats(motions,habitats);
-        world.Freeze();return new(world,features,hitPlots,motions);
+        world.Freeze();return new(world,features,hitPlots,motions){Habitats=habitats.ToArray()};
         void Place(double lat,double lon,Model3DGroup obj,string type,double radius=2.69,double heading=0)
         {
             var surface=PlanetView3DGeometry.SurfaceTransform(lat,lon,radius,heading);

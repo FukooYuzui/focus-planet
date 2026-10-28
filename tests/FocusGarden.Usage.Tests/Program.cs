@@ -1,5 +1,6 @@
 using FocusGarden.Core;
 using FocusGarden.App;
+using Microsoft.Data.Sqlite;
 
 var passed = 0;
 var failed = 0;
@@ -134,10 +135,81 @@ Run("invalid monotonic and idle inputs are rejected", () =>
 });
 Run("tracker disabled and locked states are exposed without accessing foreground", () =>
 {
-    using var store = new AppUsageStore(":memory:"); var tracker = new AppUsageTracker(store);
-    tracker.Enabled = false; tracker.Sample(); Equal("已暂停统计", tracker.StateText);
-    tracker.IsSessionLocked = true; tracker.Enabled = true; tracker.Sample(); Equal("系统已锁定，暂停统计", tracker.StateText);
-    tracker.Flush(); Equal(0, tracker.GetDailyUsage(start.Date).Count); Equal<string?>(null, tracker.LastError);
+    using var store = new AppUsageStore(":memory:"); var work = new SerialWorkQueue();
+    try
+    {
+        var tracker = new AppUsageTracker(store, work);
+        tracker.Enabled = false; tracker.Sample(); Equal("已暂停统计", tracker.StateText);
+        tracker.IsSessionLocked = true; tracker.Enabled = true; tracker.Sample(); Equal("系统已锁定，暂停统计", tracker.StateText);
+        Equal(true, tracker.FlushAllAsync().GetAwaiter().GetResult()); Equal(0, tracker.GetDailyUsageAsync(start.Date).GetAwaiter().GetResult().Count); Equal<string?>(null, tracker.LastError);
+    }
+    finally { work.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+});
+Run("blocked background writes leave sampling responsive and preserve later pending seconds", () =>
+{
+    using var store = new AppUsageStore(":memory:"); var work = new SerialWorkQueue();
+    using var started = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+    try
+    {
+        var hold = work.RunAsync(() => { started.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException(); });
+        if (!started.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException();
+        var tracker = new AppUsageTracker(store, work);
+        tracker.Observe(S(0)); tracker.Observe(S(1)); tracker.Observe(S(2));
+        var flush = tracker.FlushAsync(); Equal(false, flush.IsCompleted);
+        tracker.Observe(S(3));
+        var read = tracker.GetDailyUsageAsync(start.Date); Equal(false, read.IsCompleted);
+        release.Set(); hold.GetAwaiter().GetResult(); Equal(true, flush.GetAwaiter().GetResult());
+        Equal(3, read.GetAwaiter().GetResult().Single().Seconds);
+        Equal(true, tracker.FlushAllAsync().GetAwaiter().GetResult());
+        Equal(3, store.GetDailyUsage(start.Date).Single().Seconds);
+        Equal(3, tracker.GetDailyUsageAsync(start.Date).GetAwaiter().GetResult().Single().Seconds);
+    }
+    finally { release.Set(); work.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+});
+Run("a read queued before a flush overlays its snapshot exactly once", () =>
+{
+    using var store = new AppUsageStore(":memory:"); var work = new SerialWorkQueue();
+    using var started = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+    try
+    {
+        var tracker = new AppUsageTracker(store, work);
+        tracker.Observe(S(0)); tracker.Observe(S(1)); Equal(true, tracker.FlushAllAsync().GetAwaiter().GetResult());
+        tracker.Observe(S(2));
+        var hold = work.RunAsync(() => { started.Set(); if (!release.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException(); });
+        if (!started.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException();
+        var read = tracker.GetDailyUsageAsync(start.Date);
+        var flush = tracker.FlushAsync();
+        release.Set(); hold.GetAwaiter().GetResult();
+        Equal(2, read.GetAwaiter().GetResult().Single().Seconds);
+        Equal(true, flush.GetAwaiter().GetResult()); Equal(2, store.GetDailyUsage(start.Date).Single().Seconds);
+    }
+    finally { release.Set(); work.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+});
+Run("failed atomic batches remain pending once and later retries do not replay successful credits", () =>
+{
+    var path = Path.Combine(temporaryRoot, "tracker-retry.db");
+    using var store = new AppUsageStore(path); var work = new SerialWorkQueue();
+    try
+    {
+        void Execute(string sql)
+        {
+            using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+            connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql; command.ExecuteNonQuery();
+        }
+        Execute("CREATE TRIGGER synthetic_failure BEFORE INSERT ON app_usage_days BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END;");
+        var tracker = new AppUsageTracker(store, work); tracker.Observe(S(0)); tracker.Observe(S(1)); tracker.Observe(S(2));
+        Equal(false, tracker.FlushAllAsync().GetAwaiter().GetResult());
+        Equal(false, tracker.FlushAllAsync().GetAwaiter().GetResult());
+        Equal(0, store.GetDailyUsage(start.Date).Count);
+        Equal(2, tracker.GetDailyUsageAsync(start.Date).GetAwaiter().GetResult().Single().Seconds);
+        if (tracker.LastError is null) throw new Exception("Failure was not exposed");
+        work.RunAsync(() => Execute("DROP TRIGGER synthetic_failure;")).GetAwaiter().GetResult();
+        Equal(true, tracker.FlushAllAsync().GetAwaiter().GetResult());
+        Equal(true, tracker.FlushAllAsync().GetAwaiter().GetResult());
+        Equal(2, store.GetDailyUsage(start.Date).Single().Seconds); Equal<string?>(null, tracker.LastError);
+        tracker.Observe(S(3)); Equal(true, tracker.FlushAllAsync().GetAwaiter().GetResult()); Equal(3, store.GetDailyUsage(start.Date).Single().Seconds);
+    }
+    finally { work.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
 });
 
 var resolvedTestRoot = Path.GetFullPath(temporaryRoot);

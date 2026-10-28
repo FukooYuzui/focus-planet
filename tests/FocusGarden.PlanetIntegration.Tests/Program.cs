@@ -1,9 +1,13 @@
 using System.IO;
 using System.Reflection;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using System.Xml.Linq;
 using FocusGarden.App;
 using FocusGarden.Core;
 using Microsoft.Data.Sqlite;
@@ -17,7 +21,8 @@ internal static class Program
         // All data is synthetic and isolated. No window is shown and no desktop input is sent.
         var root = Path.Combine(Path.GetTempPath(), "FocusPlanet-Integration-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        var app = new App(); app.InitializeComponent();
+        SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
+        var app = new TestApplication { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         int passed = 0, failed = 0;
         void Run(string name, Action body)
         { try { body(); passed++; Console.WriteLine("PASS " + name); } catch (Exception e) { failed++; Console.WriteLine("FAIL " + name + ": " + e); } }
@@ -29,6 +34,7 @@ internal static class Program
         }
         SetDataDirectory(first);
         var fresh = new MainWindow();
+        PrepareWindow(fresh);
         try
         {
             Run("new planet ignores historical focus and starts barren", () =>
@@ -37,12 +43,14 @@ internal static class Program
                 Assert(s.TotalGrowth == 0 && s.Level == 0);
                 Assert(Field<FrameworkElement>(fresh, "PlanetPage").Visibility == Visibility.Visible);
                 Assert(fresh.Title.Contains("专注星球 " + App.CurrentVersion));
+                var view = Field<object>(fresh, "planetView");
+                Assert((int)view.GetType().GetProperty("SceneBuildCount", Flags)!.GetValue(view)! == 1);
             });
             Run("new focus feeds planet once and page navigation preserves timer setup", () =>
             {
                 var store = Field<FocusStore>(fresh, "store"); var end = DateTimeOffset.Now;
                 var id = store.BeginSession("验收新增专注", 120, end.AddMinutes(-2)); store.AddProgress(id, 120, end); store.EndSession(id, "completed", end);
-                Call(fresh, "RefreshPlanet"); Assert(Field<PlanetSnapshot>(fresh, "planetSnapshot").TotalGrowth == 2);
+                Call(fresh, "ForceRefreshPlanetAsync"); Assert(Field<PlanetSnapshot>(fresh, "planetSnapshot").TotalGrowth == 2);
                 Call(fresh, "RefreshPlanet"); Assert(Field<PlanetSnapshot>(fresh, "planetSnapshot").TotalGrowth == 2);
                 Call(fresh, "Page", "focus"); Assert(Field<FrameworkElement>(fresh, "FocusPage").Visibility == Visibility.Visible);
                 Assert(Field<FrameworkElement>(fresh, "PlanetPage").Visibility == Visibility.Collapsed);
@@ -54,9 +62,95 @@ internal static class Program
                 Assert(Field<TextBlock>(fresh, "PlanetNextText").Text.Contains("森林萌芽"));
                 Assert(!Field<Button>(fresh, "ExplorePlanetButton").IsEnabled);
             });
+            Run("locked growth database leaves dispatcher responsive and retry awards focus once", () =>
+            {
+                AddFocus(fresh, 60);
+                using var blocker = new SqliteConnection("Data Source=" + Path.Combine(first, "planet.db")); blocker.Open();
+                using var transaction = blocker.BeginTransaction();
+                var started = System.Diagnostics.Stopwatch.StartNew();
+                var refresh = (Task<bool>)Invoke(fresh, "RefreshPlanetAsync")!;
+                Assert(started.Elapsed < TimeSpan.FromMilliseconds(500));
+                bool responsive = false;
+                Dispatcher.CurrentDispatcher.BeginInvoke(() => responsive = true);
+                PumpFor(TimeSpan.FromMilliseconds(150));
+                Assert(responsive && !refresh.IsCompleted);
+                transaction.Commit(); Await(refresh); Assert(refresh.Result);
+                Assert(Field<PlanetSnapshot>(fresh, "planetSnapshot").TotalGrowth == 3);
+                Call(fresh, "RefreshPlanetAsync"); Assert(Field<PlanetSnapshot>(fresh, "planetSnapshot").TotalGrowth == 3);
+                Assert(Field<FocusStore>(fresh, "store").GetAllDailyTotals().Values.Sum() == 3780);
+            });
+            Run("unchanged refresh reads through a held writer lock without requesting a write", () =>
+            {
+                using var blocker = new SqliteConnection("Data Source=" + Path.Combine(first, "planet.db")); blocker.Open();
+                using var transaction = blocker.BeginTransaction();
+                var refresh = (Task<bool>)Invoke(fresh, "RefreshPlanetAsync")!; Await(refresh);
+                Assert(refresh.Result && Field<PlanetSnapshot>(fresh, "planetSnapshot").TotalGrowth == 3);
+                transaction.Rollback();
+            });
+            Run("hidden planet applies cached updates immediately on return without resetting camera", () =>
+            {
+                var view = Field<object>(fresh, "planetView");
+                view.GetType().GetMethod("SetSurfaceView")!.Invoke(view, new object[] { true });
+                Call(view, "SetZoom", .94);
+                Call(fresh, "Page", "focus"); AddFocus(fresh, 60); Call(fresh, "RefreshPlanetAsync");
+                Assert(Field<bool>(fresh, "planetPresentationDirty"));
+                Call(fresh, "Page", "planet"); Call(fresh, "PlanetTick");
+                Assert(!Field<bool>(fresh, "planetPresentationDirty"));
+                Assert(Field<TextBlock>(fresh, "PlanetGrowthText").Text.Contains("4"));
+                Assert((bool)view.GetType().GetProperty("IsSurfaceView", Flags)!.GetValue(view)!);
+                Assert(Math.Abs((double)view.GetType().GetProperty("Zoom", Flags)!.GetValue(view)! - .94) < 1e-9);
+            });
             if (args.Length == 2 && args[0] == "--render") Render(fresh, Path.Combine(args[1], "专注星球-初生预览.png"));
         }
-        finally { fresh.Close(); }
+        finally { CloseWindow(fresh); }
+
+        foreach (var failPresentation in new[] { false, true })
+        Run(failPresentation
+            ? "close never replays a committed rotation when presentation read fails"
+            : "failed layout write keeps close pending and explicit retry rotates exactly once", () =>
+        {
+            var path = Path.Combine(root, failPresentation ? "closing-read-failure" : "closing-write-failure");
+            Directory.CreateDirectory(path); SetDataDirectory(path);
+            var window = new MainWindow(); PrepareWindow(window);
+            try
+            {
+                AddFocus(window, 60);
+                var before = Field<FocusStore>(window, "store").GetAllDailyTotals();
+                var id = Field<PlanetSnapshot>(window, "planetSnapshot").PlanetId.ToString();
+                Field<ComboBox>(window, "PlanetBuildingChoice").SelectedValue = "rockgarden";
+                Event(window, "StartPlanetPlacement"); Call(window, "PlanetPlotClicked", 0);
+                using var blocker = new SqliteConnection("Data Source=" + Path.Combine(path, "planet-layout.db")); blocker.Open();
+                using var transaction = blocker.BeginTransaction();
+                // The save can succeed even though the subsequent independent growth snapshot read fails.
+                if (failPresentation) Field<PlanetGrowthStore>(window, "planetStore").Dispose();
+                Invoke(window, "RotatePlanetBuilding", window, new RoutedEventArgs());
+                var close = (Task)Invoke(window, "PrepareCloseAsync")!;
+                if (failPresentation)
+                {
+                    PumpFor(TimeSpan.FromMilliseconds(150)); Assert(!close.IsCompleted);
+                    transaction.Commit(); Await(close);
+                }
+                else
+                {
+                    IOException? failure = null;
+                    try { Await(close); } catch (IOException ex) { failure = ex; }
+                    Assert(failure != null && failure.Message.Contains("家园布局"));
+                    Assert(!Field<bool>(window, "allowClose") && !Field<bool>(window, "planetDisposed"));
+                    Assert(Field<Action?>(window, "pendingClosePlanetMutation") != null);
+                    Assert(Field<PlanetLayoutStore>(window, "planetLayout").GetBuildings(id).Single().QuarterTurns == 0);
+                    transaction.Commit();
+                    Await((Task)Invoke(window, "PrepareCloseAsync")!);
+                }
+                Assert(Field<Action?>(window, "pendingClosePlanetMutation") == null);
+                // A further close request is idempotent, including non-idempotent rotation operations.
+                Await((Task)Invoke(window, "PrepareCloseAsync")!);
+                using var layout = new PlanetLayoutStore(Path.Combine(path, "planet-layout.db"));
+                Assert(layout.GetBuildings(id).Single().QuarterTurns == 1);
+                using var focus = new FocusStore(Path.Combine(path, "focus.db"));
+                Assert(before.OrderBy(p => p.Key).SequenceEqual(focus.GetAllDailyTotals().OrderBy(p => p.Key)));
+            }
+            finally { CloseWindow(window); }
+        });
 
         var maturePath = Path.Combine(root, "mature"); Directory.CreateDirectory(maturePath);
         long planetId;
@@ -71,7 +165,7 @@ internal static class Program
         {
             foreach (var (kind, plot) in new[] { ("house", 0), ("house", 2), ("house", 6), ("windmill", 4), ("tower", 9), ("observatory", 1), ("tree", 11), ("flower", 12) }) layout.Place(planetId.ToString(), kind, plot, 5);
         }
-        SetDataDirectory(maturePath); var mature = new MainWindow();
+        SetDataDirectory(maturePath); var mature = new MainWindow(); PrepareWindow(mature);
         try
         {
             Run("six-month mature fixture restores growth and independent layout", () =>
@@ -152,13 +246,12 @@ internal static class Program
             {
                 var prefs = Field<object>(mature, "dashboardPreferences");
                 prefs.GetType().GetProperty("CodexHome")!.SetValue(prefs, Path.Combine(root, "missing-source"));
-                var focus = Field<FocusStore>(mature, "store"); var now = DateTimeOffset.Now;
-                var id = focus.BeginSession("写入故障测试", 60, now.AddMinutes(-1)); focus.AddProgress(id, 60, now); focus.EndSession(id, "completed", now);
+                var now = DateTimeOffset.Now; AddFocus(mature, 60);
                 using var db = new SqliteConnection("Data Source=" + Path.Combine(maturePath, "planet.db")); db.Open();
                 using var cmd = db.CreateCommand(); cmd.CommandText = "CREATE TRIGGER qa_fail_credit BEFORE INSERT ON planet_growth_credits BEGIN SELECT RAISE(ABORT, 'QA simulated write failure'); END;"; cmd.ExecuteNonQuery();
                 bool travelled = false;
                 var task = (Task)mature.GetType().GetMethod("TravelPlanetAsync", Flags)!.Invoke(mature, new object[] { (Action)(() => travelled = true) })!;
-                task.GetAwaiter().GetResult(); Assert(!travelled);
+                Await(task); Assert(!travelled);
                 Assert(Field<PlanetGrowthStore>(mature, "planetStore").GetSnapshot(now).TotalGrowth == 9600);
                 cmd.CommandText = "DROP TRIGGER qa_fail_credit"; cmd.ExecuteNonQuery();
                 Call(mature, "RefreshPlanet"); var s = Field<PlanetSnapshot>(mature, "planetSnapshot"); Assert(s.PlanetId == planetId && s.TotalGrowth == 9601);
@@ -168,14 +261,95 @@ internal static class Program
             if (args.Length == 2 && args[0] == "--render") Render(mature, Path.Combine(args[1], "专注星球-成熟家园演示.png"));
             Field<CheckBox>(mature, "PlanetEditCheck").IsChecked = true; Event(mature, "TogglePlanetEdit");
             if (args.Length == 2 && args[0] == "--render") Render(mature, Path.Combine(args[1], "专注星球-布局演示.png"));
+            Run("closing waits for accepted layout write and preserves independent saved focus", () =>
+            {
+                var before = Field<FocusStore>(mature, "store").GetAllDailyTotals();
+                Field<ComboBox>(mature, "PlanetBuildingChoice").SelectedValue = "flower"; Event(mature, "StartPlanetPlacement");
+                var used = Field<IReadOnlyList<PlanetBuildingPlacement>>(mature, "planetBuildings").Select(b => b.PlotId).ToHashSet();
+                var plot = Enumerable.Range(0, 32).First(p => !used.Contains(p));
+                using var blocker = new SqliteConnection("Data Source=" + Path.Combine(maturePath, "planet-layout.db")); blocker.Open();
+                using var transaction = blocker.BeginTransaction();
+                Invoke(mature, "PlanetPlotClicked", plot);
+                var close = (Task)Invoke(mature, "PrepareCloseAsync")!;
+                bool responsive = false; Dispatcher.CurrentDispatcher.BeginInvoke(() => responsive = true);
+                PumpFor(TimeSpan.FromMilliseconds(150)); Assert(responsive && !close.IsCompleted);
+                transaction.Commit(); Await(close);
+                using var layout = new PlanetLayoutStore(Path.Combine(maturePath, "planet-layout.db"));
+                Assert(layout.GetBuildings(planetId.ToString()).Any(b => b.PlotId == plot && b.Kind == "flower"));
+                using var focus = new FocusStore(Path.Combine(maturePath, "focus.db"));
+                Assert(before.OrderBy(p => p.Key).SequenceEqual(focus.GetAllDailyTotals().OrderBy(p => p.Key)));
+            });
         }
-        finally { mature.Close(); app.Shutdown(); }
+        finally { CloseWindow(mature); app.Shutdown(); }
         Console.WriteLine($"{passed} passed / {failed} failed; isolated fixtures: {root}");
         return failed == 0 ? 0 : 1;
     }
-    private static void SetDataDirectory(string path) => typeof(App).GetProperty(nameof(App.DataDirectory))!.SetValue(null, path);
+    private static void SetDataDirectory(string path)
+    {
+        var emptyCodex = Path.Combine(path, "empty-codex"); Directory.CreateDirectory(emptyCodex);
+        File.WriteAllText(Path.Combine(path, "dashboard.json"), JsonSerializer.Serialize(new { TrackApplications = false, AutoRefreshTokens = false, CodexHome = emptyCodex }));
+        typeof(App).GetProperty(nameof(App.DataDirectory))!.SetValue(null, path);
+    }
+    // Use production resources without running App.OnStartup or opening the real data directory.
+    private sealed class TestApplication : Application
+    {
+        public TestApplication()
+        {
+            using var stream = typeof(Program).Assembly.GetManifestResourceStream("PlanetIntegrationTests.ProductionApp.xaml")!;
+            using var reader = new StreamReader(stream);
+            var document = XElement.Parse(reader.ReadToEnd());
+            XNamespace ns = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+            var dictionary = new XElement(ns + "ResourceDictionary", new XAttribute(XNamespace.Xmlns + "x", "http://schemas.microsoft.com/winfx/2006/xaml"),
+                document.Element(ns + "Application.Resources")!.Elements().Select(element => new XElement(element)));
+            Resources = (ResourceDictionary)XamlReader.Parse(dictionary.ToString());
+        }
+        protected override void OnStartup(StartupEventArgs e) { }
+    }
     private static T Field<T>(object o, string name) => (T)o.GetType().GetField(name, Flags)!.GetValue(o)!;
-    private static void Call(object o, string name, params object[] values) => o.GetType().GetMethod(name, Flags)!.Invoke(o, values);
+    private static object? Invoke(object o, string name, params object[] values) => o.GetType().GetMethod(name, Flags)!.Invoke(o, values);
+    private static void Call(object o, string name, params object[] values)
+    {
+        if (Invoke(o, name, values) is Task operation) Await(operation);
+        if (o is MainWindow && name != "DrainPlanetAsync") Await((Task)Invoke(o, "DrainPlanetAsync")!);
+    }
+    private static void PrepareWindow(MainWindow window)
+    {
+        Field<DispatcherTimer>(window, "timer").Stop();
+        Await((Task)Invoke(window, "WaitForBackgroundAsync")!);
+    }
+    private static void CloseWindow(MainWindow window)
+    {
+        Await((Task)Invoke(window, "PrepareCloseAsync")!); window.Close();
+    }
+    private static void AddFocus(MainWindow window, int seconds)
+    {
+        Await((Task)Invoke(window, "WaitForBackgroundAsync")!);
+        var store = Field<FocusStore>(window, "store"); var end = DateTimeOffset.Now;
+        var id = store.BeginSession("合成专注", seconds, end.AddSeconds(-seconds));
+        store.AddProgress(id, seconds, end); store.EndSession(id, "completed", end);
+        var revision = window.GetType().GetField("focusDataRevision", Flags)!;
+        revision.SetValue(window, (long)revision.GetValue(window)! + 1);
+    }
+    private static void Await(Task task)
+    {
+        if (!task.IsCompleted)
+        {
+            var frame = new DispatcherFrame(); var dispatcher = Dispatcher.CurrentDispatcher;
+            bool timedOut = false;
+            var timeout = new DispatcherTimer(DispatcherPriority.Send) { Interval = TimeSpan.FromSeconds(30) };
+            timeout.Tick += (_, _) => { timedOut = true; frame.Continue = false; };
+            _ = task.ContinueWith(_ => dispatcher.BeginInvoke(() => frame.Continue = false), TaskScheduler.Default);
+            timeout.Start(); Dispatcher.PushFrame(frame); timeout.Stop();
+            if (timedOut && !task.IsCompleted) throw new TimeoutException("Background operation did not finish within 30 seconds.");
+        }
+        task.GetAwaiter().GetResult();
+    }
+    private static void PumpFor(TimeSpan duration)
+    {
+        var frame = new DispatcherFrame(); var timer = new DispatcherTimer(DispatcherPriority.Background) { Interval = duration };
+        timer.Tick += (_, _) => frame.Continue = false;
+        timer.Start(); Dispatcher.PushFrame(frame); timer.Stop();
+    }
     private static void Event(object o, string name) => Call(o, name, o, new RoutedEventArgs());
     private static void Assert(bool condition) { if (!condition) throw new Exception("Assertion failed"); }
     private static void Render(Window window, string path, int width = 1380, int height = 1040)

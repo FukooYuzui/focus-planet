@@ -73,7 +73,7 @@ try
         var db = Database(directory);
         string? recoveredSnapshot = null;
         int expectedBackups = 0;
-        foreach (var version in new[] { "0.2.0", "0.3.0", "0.6.1", "0.7.0", "0.7.1", "0.7.2", "0.7.3", "0.7.4" })
+        foreach (var version in new[] { "0.2.0", "0.3.0", "0.6.1", "0.7.0", "0.7.1", "0.7.2", "0.7.3", "0.7.4", "0.7.5" })
         {
             RequiredBackup(FocusDataProtection.PrepareForVersion(directory, version), directory, version);
             expectedBackups++;

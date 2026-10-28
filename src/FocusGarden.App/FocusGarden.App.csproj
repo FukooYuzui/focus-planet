@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType><TargetFramework>net8.0-windows</TargetFramework><UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><AssemblyName>FocusGarden</AssemblyName>
-    <Version>0.7.4</Version><Product>专注星球</Product><Title>专注星球</Title><Description>用专注与探索，养成自己的小星球。</Description><ApplicationManifest>app.manifest</ApplicationManifest><RuntimeFrameworkVersion>8.0.22</RuntimeFrameworkVersion>
+    <Version>0.7.5</Version><Product>专注星球</Product><Title>专注星球</Title><Description>用专注与探索，养成自己的小星球。</Description><ApplicationManifest>app.manifest</ApplicationManifest><RuntimeFrameworkVersion>8.0.22</RuntimeFrameworkVersion>
     <ApplicationIcon>Assets/FocusPlanet.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../FocusGarden.Core/FocusGarden.Core.csproj"/><ProjectReference Include="../FocusGarden.Timing/FocusGarden.Timing.csproj"/></ItemGroup>

@@ -117,12 +117,12 @@ public sealed class PlanetGrowthStore : IDisposable
                 var seconds = day == state.ActivationDay ? Math.Max(0, observed - state.FocusBaseline) : observed;
                 using var command = Command(transaction, """
                     INSERT INTO planet_days(day,focus_seconds) VALUES($day,$seconds)
-                    ON CONFLICT(day) DO UPDATE SET focus_seconds=MAX(focus_seconds,excluded.focus_seconds)
+                    ON CONFLICT(day) DO UPDATE SET focus_seconds=excluded.focus_seconds
+                    WHERE excluded.focus_seconds > planet_days.focus_seconds
                     """);
                 command.Parameters.AddWithValue("$day", day);
                 command.Parameters.AddWithValue("$seconds", seconds);
-                command.ExecuteNonQuery();
-                touched.Add(day);
+                if (command.ExecuteNonQuery() > 0) touched.Add(day);
             }
 
             var tokenFirstDay = state.TokenPeriodStart is { } start ? LocalDay(start) : state.ActivationDay;

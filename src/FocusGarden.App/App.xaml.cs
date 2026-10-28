@@ -12,7 +12,7 @@ public partial class App : Application
     public static string CurrentVersion => typeof(App).Assembly.GetName().Version!.ToString(3);
     public static string DataDirectory { get; private set; } = "";
     public static bool TestMode { get; private set; }
-    protected override void OnStartup(StartupEventArgs e)
+    protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         bool checkInstallation = e.Args.Contains("--check-installation");
@@ -52,6 +52,7 @@ public partial class App : Application
                     WindowIconHeight = MainWindow.Icon?.Height,
                     BrowserExtensionDirectory = browserExtensionDirectory
                 }));
+                await ((MainWindow)MainWindow).PrepareCloseAsync();
                 MainWindow.Close(); Shutdown(); return;
             }
             MainWindow.Show();

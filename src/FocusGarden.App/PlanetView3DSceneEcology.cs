@@ -61,11 +61,13 @@ internal static partial class PlanetView3DScene
         _=>false
     };
 
-    private static void ResolveHabitats(List<PlanetSceneMotion> motions,List<(string Kind,Vector3D Normal)> habitats)
+    internal static void ResolveHabitats(List<PlanetSceneMotion> motions,List<(string Kind,Vector3D Normal)> habitats)
     {
         for(int i=0;i<motions.Count;i++)
         {
             var motion=motions[i];if(motion.Kind!="creature")continue;
+            // A moved or removed habitat must not leave an animal visiting its old location.
+            motion=motion with {Destination=motion.Home,Habitat=null};motions[i]=motion;
             double closest=Math.Cos(.68);(string Kind,Vector3D Normal)? target=null;
             foreach(var habitat in habitats)
             {

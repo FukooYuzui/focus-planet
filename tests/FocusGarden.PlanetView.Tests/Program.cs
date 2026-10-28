@@ -28,6 +28,108 @@ internal static class Program
         Test("control validates states and skips redundant rebuilds",()=>{var c=new PlanetView3D();c.SetState(3,"clear",false,false);int built=c.SceneBuildCount;c.SetState(3,"clear",false,false);Assert(c.SceneBuildCount==built);c.SetState(3,"clear",true,false);Assert(c.SceneBuildCount==built&&!c.AnimationRunning);c.SetState(3,"rain",true,false);Assert(c.SceneBuildCount==built+1);Throws(()=>c.SetState(-1,"clear",false,false));Throws(()=>c.SetState(6,"clear",false,false));Throws(()=>c.SetState(0,"unknown",false,false));c.SetZoom(.1);Assert(c.Zoom==.45);c.SetZoom(100);Assert(c.Zoom==1.7);c.ResetView();Assert(c.Zoom==1);});
         Test("32 stable spherical plots expose editable hit geometry",()=>{Assert(PlanetView3DScene.Plots.Count==32);var s=PlanetView3DScene.Build(4,"clear",false,42,[new("a","house",0,1),new("b","windmill",9,3)],true,0);Assert(s.Features["plot"]==32&&s.Features["house"]==1&&s.Features["windmill"]==1);Assert(s.PlotHits.Values.Distinct().Count()==32);CheckGroup(s.Model);var normal=PlanetView3DScene.Build(4,"clear",false,42);Assert(normal.PlotHits.Count==0);});
         Test("layout inputs are snapshotted, validated, and rebuild only on change",()=>{var c=new PlanetView3D();var list=new List<PlanetBuildingPlacement>{new("a","house",0,1)};c.SetBuildings(list);int built=c.SceneBuildCount;c.SetBuildings(list);Assert(c.SceneBuildCount==built);list.Add(new("b","tree",1,0));Assert(!c.FeatureCounts.ContainsKey("tree"));c.SetBuildings(list);Assert(c.FeatureCounts["tree"]==1);c.SetEditMode(true);c.SelectPlot(1);Assert(c.SelectedPlotId==1&&c.FeatureCounts["plot"]==32);c.SetEditMode(false);Assert(c.SelectedPlotId==null&&!c.FeatureCounts.ContainsKey("plot"));Throws(()=>c.SetBuildings([new("a","house",32,0)]));Throws(()=>c.SetBuildings([new("a","house",0,0),new("b","tree",0,0)]));Throws(()=>c.SetBuildings([new("a","invalid",0,0)]));});
+        Test("selection changes only the old and new markers while keeping the same natural world",()=>
+        {
+            var c=new PlanetView3D();c.ApplyState(5,"rain",true,false,42,[new("house","house",0,1),new("rabbit","rabbit",8,0)],true);
+            var body=Field<Model3DGroup>(c,"planetBody");var originalWorld=body.Children[0];var content=Scene(c).Content;int builds=c.SceneBuildCount;
+            var before=body.Children.ToArray();c.SelectPlot(0);var selected=body.Children.ToArray();
+            Assert(before.Length==selected.Length&&before.Where((model,index)=>!ReferenceEquals(model,selected[index])).Count()==1,"Selecting an empty selection changed more than its marker");
+            c.SelectPlot(8);var changed=body.Children.ToArray();
+            Assert(selected.Where((model,index)=>!ReferenceEquals(model,changed[index])).Count()==2,"Selection rebuilt a habitat, actor, building, or unrelated marker");
+            for(int i=0;i<96;i++)c.SelectPlot(i%32);
+            Assert(c.SceneBuildCount==builds&&ReferenceEquals(content,Scene(c).Content)&&ReferenceEquals(originalWorld,body.Children[0]));
+            var cached=(System.Collections.IDictionary)typeof(PlanetView3D).GetField("markerCache",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.GetValue(c)!;
+            Assert(cached.Count<=64,"Selection marker cache grows without a bound");
+        });
+        Test("moving and rotating one placement retains every unrelated model and remaps its hit identity",()=>
+        {
+            var c=new PlanetView3D();var original=new[]{new PlanetBuildingPlacement("house","house",0,0),new PlanetBuildingPlacement("tree","tree",2,0)};
+            c.ApplyState(3,"cloudy",false,false,42,original,true);var body=Field<Model3DGroup>(c,"planetBody");
+            var before=body.Children.ToArray();var originalLeaves=GeometryLeaves(body).ToArray();int builds=c.SceneBuildCount;
+            c.SetBuildings([original[0] with {PlotId=5,QuarterTurns=3},original[1]]);var after=body.Children.ToArray();
+            Assert(before.Length==after.Length&&before.Except(after).Count()==1&&after.Except(before).Count()==1,"A local placement edit replaced unrelated scene wrappers");
+            Assert(GeometryLeaves(body).ToHashSet().SetEquals(originalLeaves),"A move/rotation replaced immutable geometry wrappers");
+            var changed=after.Except(before).Single();
+            var hits=Field<IReadOnlyDictionary<GeometryModel3D,int>>(c,"plotHits");
+            Assert(GeometryLeaves(changed).All(model=>hits.TryGetValue(model,out int plot)&&plot==5),"Moved building kept its previous hit-test plot");
+            c.SetBuildings([original[1]]);
+            Assert(c.SceneBuildCount==builds&&!c.FeatureCounts.ContainsKey("house")&&ReferenceEquals(before[0],body.Children[0]));
+        });
+        Test("editing mode only changes plot overlays and moving poses without rebuilding the habitat",()=>
+        {
+            var c=new PlanetView3D();c.ApplyState(5,"cloudy",false,false,42,MaximumMovingLayout(),false);
+            var content=Scene(c).Content;var terrain=Field<Model3DGroup>(c,"planetBody").Children[0];int builds=c.SceneBuildCount;
+            var originals=GeometryLeaves(content).ToHashSet();c.SetEditMode(true);
+            Assert(originals.IsSubsetOf(GeometryLeaves(Scene(c).Content).ToHashSet())&&c.FeatureCounts["plot"]==32);
+            c.SetEditMode(false);
+            Assert(originals.SetEquals(GeometryLeaves(Scene(c).Content))&&ReferenceEquals(terrain,Field<Model3DGroup>(c,"planetBody").Children[0]));
+            Assert(ReferenceEquals(content,Scene(c).Content)&&c.SceneBuildCount==builds);
+        });
+        Test("combined state starts and travels with one final scene and rejects invalid input atomically",()=>
+        {
+            var c=new PlanetView3D(deferInitialScene:true);Assert(c.SceneBuildCount==0);
+            var layout=new[]{new PlanetBuildingPlacement("home","house",0,2)};
+            c.ApplyState(5,"rain",true,true,43,layout,true,0);Assert(c.SceneBuildCount==1&&c.FeatureCounts["house"]==1&&c.SelectedPlotId==0);
+            c.ApplyState(3,"clear",false,false,44,[new("new-tree","tree",3,1)],false);
+            Assert(c.SceneBuildCount==2&&!c.FeatureCounts.ContainsKey("house")&&!c.FeatureCounts.ContainsKey("plot")&&c.SelectedPlotId is null);
+            var content=Scene(c).Content;var signature=Signature((Model3DGroup)content);
+            Throws(()=>c.ApplyState(4,"rain",false,false,42,[new("invalid","house",32,0)],true));
+            Assert(ReferenceEquals(content,Scene(c).Content)&&signature==Signature((Model3DGroup)content)&&c.SceneBuildCount==2);
+        });
+        Test("local habitat replacement updates creature destinations without stale targets or new models",()=>
+        {
+            var pair=NearbyPlotPairs().First(p=>PlanetView3DScene.Build(0,"clear",false,42,[new("duck","duck",p.First,0),new("pond","pond",p.Second,0)]).Motions.Single().Habitat=="pond");
+            var animal=new PlanetBuildingPlacement("duck","duck",pair.First,0);var pond=new PlanetBuildingPlacement("pond","pond",pair.Second,0);
+            var c=new PlanetView3D();c.ApplyState(0,"clear",false,false,42,[animal,pond],false);int builds=c.SceneBuildCount;
+            Assert(c.InteractionCount==1);var before=LiveMotions(c).Single();
+            Assert(Angle(before.Destination,PlotDirection(pair.Second))<1e-6);
+            c.SetBuildings([animal]);var removed=LiveMotions(c).Single();
+            Assert(c.InteractionCount==0&&removed.Habitat is null&&Angle(removed.Home,removed.Destination)<1e-6,"Removed pond remained an interaction target");
+            c.SetBuildings([animal,pond]);var restored=LiveMotions(c).Single();
+            Assert(c.InteractionCount==1&&ReferenceEquals(before.Model,restored.Model)&&c.SceneBuildCount==builds);
+            Assert(Angle(restored.Destination,PlotDirection(pair.Second))<1e-6);
+        });
+        Test("removing a visible habitat clears the old creature pose even when its new home is culled",()=>
+        {
+            var pair=NearbyPlotPairs().First(p=>PlanetView3DScene.Build(0,"clear",false,42,[new("duck","duck",p.First,0),new("pond","pond",p.Second,0)]).Motions.Single().Habitat=="pond");
+            var animal=new PlanetBuildingPlacement("duck","duck",pair.First,0);var pond=new PlanetBuildingPlacement("pond","pond",pair.Second,0);
+            var c=ArrangedPlanet(new Size(1000,700));c.ApplyState(0,"clear",false,false,42,[animal,pond],false);
+            var actors=(System.Collections.IEnumerable)typeof(PlanetView3D).GetField("motions",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.GetValue(c)!;
+            var actor=actors.Cast<object>().Single();var surface=(MatrixTransform3D)actor.GetType().GetField("Surface",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.GetValue(actor)!;
+            bool found=false;
+            foreach(var pitch in new[]{-60.0,-30,0,30,60})
+            {
+                for(int yaw=0;yaw<360&&!found;yaw+=5)
+                {
+                    c.ResetView();c.RotateView(yaw,pitch);c.AnimateScene(0);bool hiddenHome=c.LastCulledObjectCount==1;
+                    c.AnimateScene(12);found=hiddenHome&&c.LastAnimatedObjectCount==1;
+                }
+                if(found)break;
+            }
+            Assert(found,"The synthetic camera must see the pond while the creature's home is occluded");
+            var original=LiveMotions(c).Single();var previous=surface.Matrix;int builds=c.SceneBuildCount;
+            Assert(!FullMatrixClose(previous,original.Surface.Value),"The creature never reached the pond");
+            typeof(PlanetView3D).GetField("animationSeconds",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.SetValue(c,12.0);
+            c.SetBuildings([animal]);
+            Assert(c.LastCulledObjectCount==1,"The new home must remain culled for this regression");
+            Assert(FullMatrixClose(surface.Matrix,LiveMotions(c).Single().Surface.Value),"A culled creature retained its pose at the removed pond");
+            Assert(ReferenceEquals(original.Model,LiveMotions(c).Single().Model)&&c.SceneBuildCount==builds,"Clearing a stale pose rebuilt frozen geometry");
+        });
+        Test("incremental full layouts keep equivalent visual budgets and bounded local edit cost",()=>
+        {
+            var layout=MaximumMovingLayout();var c=new PlanetView3D();c.ApplyState(5,"rain",false,false,42,layout,true);
+            var expected=PlanetView3DScene.Build(5,"rain",false,42,layout,true);var expectedMetrics=SceneMetrics(expected);var actual=Metrics(GeometryLeaves(Scene(c).Content));
+            Assert(expectedMetrics.Triangles==actual.Triangles&&expectedMetrics.GeometryModels==actual.GeometryModels&&actual.Triangles<=220000);
+            Assert(c.FeatureCounts.Count==expected.Features.Count&&c.FeatureCounts.All(entry=>expected.Features.TryGetValue(entry.Key,out var count)&&count==entry.Value));
+            int builds=c.SceneBuildCount;var natural=Field<Model3DGroup>(c,"planetBody").Children[0];var samples=new double[80];
+            for(int index=0;index<samples.Length;index++)
+            {
+                var changed=layout.ToArray();changed[0]=changed[0] with {QuarterTurns=index%4};
+                var watch=System.Diagnostics.Stopwatch.StartNew();c.SetBuildings(changed);watch.Stop();samples[index]=watch.Elapsed.TotalMilliseconds;
+            }
+            Array.Sort(samples);Assert(c.SceneBuildCount==builds&&ReferenceEquals(natural,Field<Model3DGroup>(c,"planetBody").Children[0]));
+            Console.WriteLine($"  Local full-layout edits: p95 {samples[75]:0.0000} ms, max {samples[^1]:0.0000} ms, zero natural-scene rebuilds. This measures UI model updates, not GPU presentation.");
+        });
         Test("rendered surface hit testing finds front plots and respects occlusion",()=>{var c=new PlanetView3D {Width=700,Height=500};c.SetState(3,"clear",false,false);c.SetEditMode(true);c.Measure(new Size(700,500));c.Arrange(new Rect(0,0,700,500));c.UpdateLayout();var hits=new HashSet<int>();for(int y=20;y<450;y+=7)for(int x=70;x<630;x+=7){var hit=c.HitTestPlot(new Point(x,y));if(hit.HasValue)hits.Add(hit.Value);}Assert(hits.Count>=4&&hits.Count<20);Assert(c.HitTestPlot(new Point(0,0))==null);Console.WriteLine($"  {hits.Count} visible plots respond to hit testing");});
         Test("animals and clouds move without rebuilding frozen meshes",()=>{var c=new PlanetView3D();c.SetState(3,"cloudy",false,false);Assert(c.MovingObjectCount==c.FeatureCounts["creature"]+c.FeatureCounts["cloud"]&&c.FeatureCounts["creature"]>=10);int built=c.SceneBuildCount;c.AnimateScene(0);double before=c.MotionOffsetTotal;c.AnimateScene(3);Assert(c.MotionOffsetTotal!=before&&c.SceneBuildCount==built);Assert(!c.AnimationRunning);c.SetEditMode(true);Assert(!c.AnimationRunning);c.SetState(0,"clear",false,false);Assert(c.MovingObjectCount==0);});
         Test("detailed worlds remain bounded and barren worlds have geological variety",()=>
@@ -580,6 +682,11 @@ internal static class Program
     {
         var frame=new DispatcherFrame();var timer=new DispatcherTimer {Interval=duration};timer.Tick+=(_,_)=>frame.Continue=false;
         try{timer.Start();Dispatcher.PushFrame(frame);}finally{timer.Stop();}
+    }
+    private static PlanetSceneMotion[] LiveMotions(PlanetView3D control)
+    {
+        var actors=(System.Collections.IEnumerable)typeof(PlanetView3D).GetField("motions",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.GetValue(control)!;
+        return actors.Cast<object>().Select(actor=>(PlanetSceneMotion)actor.GetType().GetField("Definition",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic|System.Reflection.BindingFlags.Public)!.GetValue(actor)!).ToArray();
     }
     private static Viewport3D Viewport(PlanetView3D control)=>Field<Viewport3D>(control,"viewport");
     private static ModelVisual3D Scene(PlanetView3D control)=>Field<ModelVisual3D>(control,"scene");

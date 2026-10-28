@@ -17,6 +17,8 @@ void Equal<T>(T expected, T actual)
     if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"Expected {expected}; got {actual}");
 }
 
+void Assert(bool value) { if (!value) throw new Exception("Assertion failed"); }
+
 void Throws<T>(Action body) where T : Exception
 {
     try { body(); } catch (T) { return; }
@@ -226,6 +228,84 @@ Run("empty and future years return zero data without fabricated entries", () =>
     Equal(0, store.GetSessions().Count); Equal(0, store.GetDailyTotals(2027).Count);
     Throws<ArgumentOutOfRangeException>(() => store.GetDailyTotals(0));
     Throws<ArgumentOutOfRangeException>(() => store.GetSessions(0));
+});
+
+Run("statistics aggregate all completions while materializing only twelve recent sessions", () =>
+{
+    using var store = new FocusStore(":memory:");
+    var start = Local(2026, 6, 1);
+    for (int i = 0; i < 25; i++)
+    {
+        var id = store.BeginSession("session " + i, 2, start.AddMinutes(i));
+        store.AddProgress(id, 2, start.AddMinutes(i).AddSeconds(2));
+        store.EndSession(id, i % 2 == 0 ? "completed" : "emergency", start.AddMinutes(i).AddSeconds(2));
+    }
+    var summary = store.GetStatistics(2026, start.LocalDateTime.Date);
+    Equal(13, summary.CompletedCount); Equal(12, summary.Latest.Count); Equal(50, summary.TodaySeconds);
+    Equal("session 24", summary.Latest[0].Task);
+    Equal(0, store.GetStatistics(2025, start.LocalDateTime.Date).CompletedCount);
+    Equal(50, store.GetStatistics(2025, start.LocalDateTime.Date).TodaySeconds);
+});
+
+Run("incremental day query includes its boundary and preserves all stored rows", () =>
+{
+    using var store = new FocusStore(":memory:");
+    foreach (var day in new[] { Local(2025, 12, 31), Local(2026, 1, 1), Local(2026, 1, 2) })
+    {
+        var id = store.BeginSession("day", 60, day); store.AddProgress(id, 7, day.AddSeconds(7)); store.EndSession(id, "emergency", day.AddSeconds(7));
+    }
+    var since = store.GetDailyTotalsSince(new DateTime(2026, 1, 1));
+    Equal(2, since.Count); Equal(7, since["2026-01-01"]); Equal(3, store.GetAllDailyTotals().Count);
+});
+
+Run("statistics count completion by local year across offset representations", () =>
+{
+    using var store = new FocusStore(":memory:");
+    var boundary = Local(2027, 1, 1);
+    foreach (var end in new[] { boundary.AddSeconds(-1), boundary, boundary.AddSeconds(1) })
+    {
+        var started = end.AddSeconds(-2).ToUniversalTime();
+        var id = store.BeginSession("year boundary", 2, started);
+        store.AddProgress(id, 2, end.ToUniversalTime());
+        store.EndSession(id, "completed", end.ToUniversalTime());
+    }
+    Equal(1, store.GetStatistics(2026, boundary.LocalDateTime.Date).CompletedCount);
+    Equal(2, store.GetStatistics(2027, boundary.LocalDateTime.Date).CompletedCount);
+    Equal(6, store.GetAllDailyTotals().Values.Sum());
+});
+
+Run("serial background work preserves FIFO and continues after a failed operation", () =>
+{
+    var queue = new SerialWorkQueue();
+    try
+    {
+        var caller = Environment.CurrentManagedThreadId;
+        var values = new List<int>();
+        var tasks = Enumerable.Range(0, 40).Select(i => queue.RunAsync(() => { Assert(Environment.CurrentManagedThreadId != caller); values.Add(i); })).ToArray();
+        Task.WhenAll(tasks).GetAwaiter().GetResult();
+        Assert(values.SequenceEqual(Enumerable.Range(0, 40)));
+        Throws<IOException>(() => queue.RunAsync(() => throw new IOException("synthetic")).GetAwaiter().GetResult());
+        Equal(42, queue.RunAsync(() => 42).GetAwaiter().GetResult());
+    }
+    finally { queue.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+    Throws<ObjectDisposedException>(() => queue.RunAsync(() => { }).GetAwaiter().GetResult());
+});
+
+Run("bounded background queue rejects excess work without dropping accepted writes on shutdown", () =>
+{
+    var queue = new SerialWorkQueue(); using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+    var blocker = queue.RunAsync(() => { entered.Set(); release.Wait(); });
+    var writes = new List<int>();
+    try
+    {
+        Assert(entered.Wait(TimeSpan.FromSeconds(5)));
+        var tasks = Enumerable.Range(0, 256).Select(i => queue.RunAsync(() => writes.Add(i))).ToArray();
+        Throws<InvalidOperationException>(() => queue.RunAsync(() => writes.Add(999)).GetAwaiter().GetResult());
+        var closing = queue.DisposeAsync().AsTask(); Assert(!closing.IsCompleted);
+        release.Set(); Task.WhenAll(tasks.Append(blocker).Append(closing)).GetAwaiter().GetResult();
+        Assert(writes.SequenceEqual(Enumerable.Range(0, 256)));
+    }
+    finally { release.Set(); queue.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
 });
 
 Console.WriteLine($"RESULT {passed} passed, {failed} failed");

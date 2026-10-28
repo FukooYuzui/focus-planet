@@ -29,6 +29,15 @@ internal static class Program
         Directory.CreateDirectory(Root);
         if (args.Length == 2 && args[0] == "--render") renderDirectory = Path.GetFullPath(args[1]);
         var app = new TestApplication { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        // Match Application.Run's UI continuation context while keeping every window hidden.
+        SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
+        if (args.Length == 2 && args[0] == "--soak")
+        {
+            if (!int.TryParse(args[1], out var minutes) || minutes is < 1 or > 60) throw new ArgumentException("Soak duration must be 1-60 minutes.");
+            try { Run("real-time synthetic continuous operation", () => Soak(minutes)); }
+            finally { app.Shutdown(); }
+            return failed == 0 ? 0 : 1;
+        }
         // No top-level window is shown, global input is not sent, and system events are simulated in-process.
         try
         {
@@ -342,6 +351,172 @@ internal static class Program
                 }
                 finally { Call(immersive, "Release"); }
             });
+
+            Run("a focus database writer lock leaves Tick and dispatcher responsive, then saves each interval once", () =>
+            {
+                using var f = new Fixture(); f.Start();
+                var before = f.AllRows();
+                using var blocker = OpenWriterLock(Path.Combine(f.DirectoryPath, "focus.db"));
+                var watch = Stopwatch.StartNew();
+                try
+                {
+                    f.Tick(2.1, waitForFocus: false); watch.Stop();
+                    Assert(watch.Elapsed < TimeSpan.FromMilliseconds(500));
+                    Assert(!Field<Task>(f.Window, "progressTask").IsCompleted);
+                    var heartbeat = false;
+                    f.Window.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() => heartbeat = true));
+                    Wait(Task.Delay(120));
+                    Assert(heartbeat);
+                    Equal(before, f.AllRows()); // WAL reads see only committed seconds while the writer waits.
+                    f.Tick(1.1, waitForFocus: false);
+                    Assert(Field<object?>(f.Window, "clock") is not null && f.Bridge.active);
+                }
+                finally { Rollback(blocker); }
+                f.Drain();
+                Equal(3, f.Current.ElapsedSeconds); Equal(3L, f.CurrentDaySeconds());
+                Equal("running", f.Current.Status);
+                var saved = f.AllRows(); f.Drain(); Equal(saved, f.AllRows());
+                f.Window.ReleaseForError(); f.AssertReleased("interrupted", 3, 3); f.AssertHistory();
+                Console.WriteLine($"Focus writer contention: Tick returned in {watch.Elapsed.TotalMilliseconds:0.###} ms; dispatcher heartbeat ran before unlock.");
+            });
+
+            foreach (var duringSessionInsert in new[] { false, true })
+                Run("lock then unlock during asynchronous " + (duringSessionInsert ? "session insertion" : "settings save") + " cancels startup without credit", () =>
+                {
+                    using var f = new Fixture();
+                    var queue = Field<SerialWorkQueue>(f.Window, "focusWork");
+                    using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+                    Task? blocking = null;
+                    void BlockQueue() => blocking = queue.RunAsync(() => { entered.Set(); release.Wait(); });
+                    if (duringSessionInsert) f.Confirm(_ => { BlockQueue(); return true; });
+                    else BlockQueue();
+                    var begin = (Task)Invoke(f.Window, "Begin", false)!;
+                    try
+                    {
+                        WaitUntil(() => entered.IsSet);
+                        Assert(!begin.IsCompleted && Field<bool>(f.Window, "startingFocus"));
+                        Call(f.Window, "SessionChanged", f.Window, new SessionSwitchEventArgs(SessionSwitchReason.SessionLock)); Pump();
+                        Call(f.Window, "SessionChanged", f.Window, new SessionSwitchEventArgs(SessionSwitchReason.SessionUnlock)); Pump();
+                        Assert(!Field<bool>(f.Window, "desktopLocked"));
+                    }
+                    finally { release.Set(); }
+                    Wait(blocking!); Wait(begin); f.Drain();
+                    Assert(Field<object?>(f.Window, "clock") is null && Field<long?>(f.Window, "sessionId") is null);
+                    Assert(!Field<bool>(f.Window, "startingFocus") && !f.Bridge.active);
+                    var added = f.Store.GetSessions().Where(row => row.Task == "strict test").ToArray();
+                    Assert(added.Length <= 1);
+                    foreach (var row in added) { Equal(0, row.ElapsedSeconds); Equal("interrupted", row.Status); }
+                    f.AssertHistory();
+                });
+
+            Run("a synchronously failed close disables new focus and retries the real close after the queue drains", () =>
+            {
+                using var f = new Fixture(); var history = f.AllRows();
+                var queue = Field<SerialWorkQueue>(f.Window, "focusWork");
+                using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+                var blocking = queue.RunAsync(() => { entered.Set(); release.Wait(); });
+                WaitUntil(() => entered.IsSet);
+                var accepted = Enumerable.Range(0, 256).Select(_ => queue.RunAsync(() => { })).ToArray();
+                bool closed = false; f.Window.Closed += (_, _) => closed = true;
+                try
+                {
+                    f.Window.Close(); Pump();
+                    Assert(!closed && Field<bool>(f.Window, "shuttingDown"));
+                    Assert(!Field<Button>(f.Window, "StartButton").IsEnabled);
+                    Assert(!Field<Button>(f.Window, "BreakButton").IsEnabled);
+                    Assert(!Field<DispatcherTimer>(f.Window, "timer").IsEnabled);
+                    Call(f.Window, "Begin", false);
+                    Assert(Field<object?>(f.Window, "clock") is null && !f.Bridge.active);
+                    Equal(history, f.AllRows());
+                }
+                finally { release.Set(); }
+                Wait(Task.WhenAll(accepted.Append(blocking)));
+                f.Window.Close(); WaitUntil(() => closed);
+                Assert(Field<bool>(f.Window, "allowClose")); Equal(history, f.AllRows());
+            });
+
+            Run("focus heatmap retains each cell and hidden pages defer updates until shown", () =>
+            {
+                using var f = new Fixture(false);
+                Call(f.Window, "Page", "focus"); f.Drain();
+                var cells = new Dictionary<string, Border>(Field<Dictionary<string, Border>>(f.Window, "heatmapCells"));
+                Equal(DateTime.IsLeapYear(DateTime.Today.Year) ? 366 : 365, cells.Count);
+                var today = DateTime.Today.ToString("yyyy-MM-dd");
+                f.Start(); f.Tick(2.1); Call(f.Window, "RefreshStatistics"); f.Drain();
+                Equal(2, Field<Dictionary<string, int>>(f.Window, "heatmapValues")[today]);
+                foreach (var pair in cells) Assert(ReferenceEquals(pair.Value, Field<Dictionary<string, Border>>(f.Window, "heatmapCells")[pair.Key]));
+                var historyVisuals = Field<StackPanel>(f.Window, "HistoryPanel").Children.Cast<UIElement>().ToArray();
+                Call(f.Window, "Page", "planet");
+                f.Tick(2.1); Call(f.Window, "RefreshStatistics"); f.Drain();
+                Equal(2, Field<Dictionary<string, int>>(f.Window, "heatmapValues")[today]);
+                Assert(historyVisuals.SequenceEqual(Field<StackPanel>(f.Window, "HistoryPanel").Children.Cast<UIElement>()));
+                Call(f.Window, "Page", "focus"); f.Drain();
+                Equal(4, Field<Dictionary<string, int>>(f.Window, "heatmapValues")[today]);
+                foreach (var pair in cells) Assert(ReferenceEquals(pair.Value, Field<Dictionary<string, Border>>(f.Window, "heatmapCells")[pair.Key]));
+                f.AssertHistory();
+            });
+
+            Run("dashboard reuses application rows and unchanged token geometry, and defers hidden rendering", () =>
+            {
+                using var f = new Fixture();
+                var queue = Field<SerialWorkQueue>(f.Window, "focusWork"); var usage = Field<AppUsageStore>(f.Window, "usageStore");
+                Wait(queue.RunAsync(() => usage.AddCredits([new("alpha.exe", DateTime.Today, 5), new("beta.exe", DateTime.Today, 3)])));
+                Call(f.Window, "Page", "focus"); f.Drain();
+                var panels = UsagePanels(f.Window);
+                Equal(2, panels.Count);
+                var calendar = Field<object>(f.Window, "tokenCalendar"); var builds = Property<int>(calendar, "SceneBuildCount");
+                Call(f.Window, "RefreshTokenUi"); Call(f.Window, "RefreshTokenUi"); f.Drain();
+                Equal(builds, Property<int>(calendar, "SceneBuildCount"));
+                Wait(queue.RunAsync(() => usage.AddCredits([new("beta.exe", DateTime.Today, 4)])));
+                Call(f.Window, "RefreshUsageUi"); f.Drain();
+                var refreshed = UsagePanels(f.Window);
+                foreach (var pair in panels) Assert(ReferenceEquals(pair.Value, refreshed[pair.Key]));
+                Assert(ReferenceEquals(panels["beta.exe"], Field<StackPanel>(f.Window, "UsageRows").Children[0]));
+                Equal("7 秒", ((TextBlock)((DockPanel)panels["beta.exe"].Children[0]).Children[0]).Text);
+                Call(f.Window, "Page", "planet");
+                Wait(queue.RunAsync(() => usage.AddCredits([new("alpha.exe", DateTime.Today, 5)])));
+                SetField(f.Window, "cachedTokenDaily", new Dictionary<string, long> { [DateTime.Today.ToString("yyyy-MM-dd")] = 1234 });
+                Call(f.Window, "RefreshUsageUi"); Call(f.Window, "RefreshTokenUi"); f.Drain();
+                Equal("5 秒", ((TextBlock)((DockPanel)panels["alpha.exe"].Children[0]).Children[0]).Text);
+                Equal(builds, Property<int>(calendar, "SceneBuildCount"));
+                Call(f.Window, "Page", "focus"); f.Drain();
+                Equal("10 秒", ((TextBlock)((DockPanel)panels["alpha.exe"].Children[0]).Children[0]).Text);
+                Equal(builds + 1, Property<int>(calendar, "SceneBuildCount"));
+                f.AssertHistory();
+            });
+
+            Run("CSV replaces an existing file safely, escapes formulas, and completes before close disposes storage", () =>
+            {
+                using var f = new Fixture();
+                var queue = Field<SerialWorkQueue>(f.Window, "focusWork");
+                Wait(queue.RunAsync(() =>
+                {
+                    var now = DateTimeOffset.Now;
+                    var id = f.Store.BeginSession("=SUM(1,2) \"quoted\"", 1, now);
+                    f.Store.AddProgress(id, 1, now.AddSeconds(1)); f.Store.EndSession(id, "completed", now.AddSeconds(1));
+                }));
+                var path = Path.Combine(f.DirectoryPath, "export.csv"); File.WriteAllText(path, "existing export");
+                var snapshot = f.AllRows();
+                using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+                var blocking = queue.RunAsync(() => { entered.Set(); release.Wait(); }); WaitUntil(() => entered.IsSet);
+                var export = (Task)Invoke(f.Window, "ExportRecordsAsync", path)!; SetField(f.Window, "exportTask", export);
+                var closing = (Task)Invoke(f.Window, "PrepareCloseAsync")!;
+                try
+                {
+                    Pump(); Assert(!export.IsCompleted && !closing.IsCompleted);
+                    Equal("existing export", File.ReadAllText(path));
+                }
+                finally { release.Set(); }
+                Wait(blocking); Wait(closing);
+                Assert(export.IsCompletedSuccessfully && Field<bool>(f.Window, "allowClose"));
+                var csv = File.ReadAllText(path);
+                Assert(csv.StartsWith("编号,任务,开始时间", StringComparison.Ordinal));
+                Assert(csv.Contains("\"'=SUM(1,2) \"\"quoted\"\"\"", StringComparison.Ordinal));
+                Assert(!csv.Contains("existing export", StringComparison.Ordinal));
+                Equal(3, File.ReadAllLines(path).Length);
+                Equal(0, Directory.GetFiles(f.DirectoryPath, ".focus-export-*.tmp").Length);
+                Equal(snapshot, f.AllRows()); f.AssertHistory();
+            });
         }
         finally { app.Shutdown(); }
         Console.WriteLine($"Strict focus: {passed} passed, {failed} failed; synthetic fixtures: {Root}");
@@ -354,11 +529,119 @@ internal static class Program
         catch (Exception exception) { failed++; Console.WriteLine("FAIL " + name + ": " + exception); }
     }
 
+    private static void Soak(int minutes)
+    {
+        using var f = new Fixture();
+        Field<TextBox>(f.Window, "FocusMinutesInput").Text = minutes.ToString();
+        var tracker = Field<object>(f.Window, "usageTracker");
+        var viewType = typeof(MainWindow).Assembly.GetType("FocusGarden.App.PlanetView3D", true)!;
+        var scene = Activator.CreateInstance(viewType, [true])!;
+        string[] kinds = ["rabbit", "rabbit", "sheep", "sheep", "fox", "fox", "duck", "duck", "deer", "deer", "butterfly", "butterfly", "pond", "pond", "flower", "flower", "meadow", "meadow", "bush", "bush", "tree", "tree", "orchard", "orchard", "mushroom", "mushroom", "rockgarden", "rockgarden", "house", "windmill", "tower", "observatory"];
+        var layout = kinds.Select((kind, index) => new PlanetBuildingPlacement("soak-" + index, kind, index, index % 4)).ToArray();
+        Call(scene, "ApplyState", 5, "rain", false, false, 42, layout, false, null!);
+        var sceneBuilds = Property<int>(scene, "SceneBuildCount");
+        var animationCpu = new List<double>(); var editCpu = new List<double>(); var heartbeatDelay = new List<double>();
+        var samples = new List<object>(); var started = DateTimeOffset.Now; var runtime = Stopwatch.StartNew();
+        f.Start();
+        int page = 0, edits = 0, usageSeconds = 0, animationCalls = 0, tokenImports = 0;
+        double nextPage = 10, nextUsage = 5, nextReport = 60, nextAnimation = 0, nextToken = 30;
+        var tokenLog = Path.Combine(f.DirectoryPath, "empty-codex", "sessions", "soak.jsonl");
+        Directory.CreateDirectory(Path.GetDirectoryName(tokenLog)!);
+        long peakPrivateBytes = 0;
+        var timer = Field<DispatcherTimer>(f.Window, "timer"); timer.Start();
+        Console.WriteLine($"SOAK START pid={Environment.ProcessId} minutes={minutes} data={f.DirectoryPath} assembly={typeof(MainWindow).Assembly.Location}");
+        try
+        {
+            while (Field<object?>(f.Window, "clock") is not null)
+            {
+                var elapsed = runtime.Elapsed.TotalSeconds;
+                if (elapsed > minutes * 60 + 60) throw new TimeoutException("Real-time focus did not complete within the allowed UI scheduling margin.");
+                var pulseAt = Stopwatch.GetTimestamp();
+                var pulse = f.Window.Dispatcher.InvokeAsync(() =>
+                {
+                    heartbeatDelay.Add(Stopwatch.GetElapsedTime(pulseAt).TotalMilliseconds);
+                }, DispatcherPriority.Background);
+                Wait(pulse.Task);
+                if (Field<object?>(f.Window, "clock") is null) break;
+                if (elapsed >= nextAnimation)
+                {
+                    var watch = Stopwatch.StartNew(); Call(scene, "AnimateScene", elapsed); watch.Stop();
+                    animationCpu.Add(watch.Elapsed.TotalMilliseconds); animationCalls++; nextAnimation = elapsed + .12;
+                }
+                if (elapsed >= nextUsage)
+                {
+                    // Synthetic samples enter the same accumulator as Win32 sampling. Native tracking remains disabled.
+                    var now = DateTimeOffset.Now; var tick = (double)Stopwatch.GetTimestamp() / Stopwatch.Frequency;
+                    Call(tracker, "Observe", new AppUsageSample("soak-editor.exe", tick, now, 0, true, false));
+                    Call(tracker, "Observe", new AppUsageSample("soak-editor.exe", tick + 1, now.AddSeconds(1), 0, true, false));
+                    usageSeconds++; nextUsage = elapsed + 5;
+                }
+                if (elapsed >= nextToken)
+                {
+                    tokenImports++;
+                    var total = new { input_tokens = tokenImports * 100, output_tokens = 0, cached_input_tokens = 0, reasoning_output_tokens = 0, total_tokens = tokenImports * 100 };
+                    var last = new { input_tokens = 100, output_tokens = 0, cached_input_tokens = 0, reasoning_output_tokens = 0, total_tokens = 100 };
+                    File.AppendAllText(tokenLog, JsonSerializer.Serialize(new { timestamp = DateTimeOffset.Now.ToString("O"), type = "event_msg", payload = new { type = "token_count", info = new { total_token_usage = total, last_token_usage = last } } }) + Environment.NewLine);
+                    Assert((bool)Call(f.Window, "ImportTokensAsync")!); nextToken = elapsed + 30;
+                }
+                if (elapsed >= nextPage)
+                {
+                    Call(f.Window, "Page", new[] { "focus", "stats", "planet" }[page++ % 3]);
+                    Call(scene, "SetSurfaceView", page % 2 == 0); Call(scene, "RotateView", 12.0, page % 2 == 0 ? 3.0 : -3.0);
+                    Call(scene, "SetEditMode", true);
+                    var watch = Stopwatch.StartNew();
+                    Call(scene, "SelectPlot", edits % 32);
+                    var target = edits % layout.Length; layout[target] = layout[target] with { QuarterTurns = (layout[target].QuarterTurns + 1) % 4 };
+                    Call(scene, "SetBuildings", (object)layout); watch.Stop(); editCpu.Add(watch.Elapsed.TotalMilliseconds);
+                    Call(scene, "SetEditMode", false); edits++; nextPage = elapsed + 10;
+                    Equal(sceneBuilds, Property<int>(scene, "SceneBuildCount"));
+                }
+                if (elapsed >= nextReport)
+                {
+                    f.Drain(); f.AssertHistory();
+                    var current = f.Current;
+                    Equal((long)current.ElapsedSeconds, f.CurrentDaySeconds());
+                    Assert(current.Status == "running" || current.Status == "completed" && current.ElapsedSeconds == minutes * 60);
+                    using var process = Process.GetCurrentProcess(); process.Refresh(); peakPrivateBytes = Math.Max(peakPrivateBytes, process.PrivateMemorySize64);
+                    samples.Add(new { ElapsedSeconds = elapsed, PersistedFocusSeconds = current.ElapsedSeconds, PrivateBytes = process.PrivateMemorySize64, ManagedBytes = GC.GetTotalMemory(false), Gen0 = GC.CollectionCount(0), Gen1 = GC.CollectionCount(1), Gen2 = GC.CollectionCount(2) });
+                    Console.WriteLine($"SOAK {elapsed / 60:0.0} min focus={current.ElapsedSeconds}s private={process.PrivateMemorySize64 / 1048576.0:0.0}MiB sceneBuilds={Property<int>(scene, "SceneBuildCount")} edits={edits}");
+                    nextReport = elapsed + 60;
+                }
+                Thread.Sleep(20);
+            }
+        }
+        finally { timer.Stop(); }
+        f.Drain();
+        f.AssertReleased("completed", minutes * 60, minutes * 60); f.AssertHistory();
+        var saved = f.AllRows(); f.Drain(); Equal(saved, f.AllRows());
+        var usage = new[] { started.LocalDateTime.Date, DateTime.Today }.Distinct().SelectMany(day => Field<AppUsageStore>(f.Window, "usageStore").GetDailyUsage(day)).Where(row => row.AppName == "soak-editor.exe").Sum(row => row.Seconds);
+        Equal(usageSeconds, usage);
+        var tokens = Field<CodexUsageImporter>(f.Window, "tokenImporter").GetTotals().TotalTokens;
+        Equal(tokenImports * 100L, tokens);
+        Equal(sceneBuilds, Property<int>(scene, "SceneBuildCount"));
+        double P95(List<double> values) => values.Count == 0 ? 0 : values.Order().ElementAt((int)Math.Floor((values.Count - 1) * .95));
+        var result = new
+        {
+            StartedAt = started, FinishedAt = DateTimeOffset.Now, DurationSeconds = runtime.Elapsed.TotalSeconds,
+            DataDirectory = f.DirectoryPath, ProcessId = Environment.ProcessId, FocusSeconds = f.Current.ElapsedSeconds,
+            UsageSeconds = usage, TokenImports = tokenImports, ImportedTokens = tokens, HistoricalRowsUnchanged = true, DuplicateCredit = false,
+            NaturalSceneRebuildsDuringLocalEdits = Property<int>(scene, "SceneBuildCount") - sceneBuilds,
+            AnimationCalls = animationCalls, LocalEdits = edits, AnimationCpuP95Ms = P95(animationCpu), LocalEditCpuP95Ms = P95(editCpu),
+            DispatcherPostToCallbackP95Ms = P95(heartbeatDelay), DispatcherPostToCallbackMaximumMs = heartbeatDelay.Count == 0 ? 0 : heartbeatDelay.Max(),
+            PeakPrivateBytes = peakPrivateBytes, Samples = samples,
+            Limitations = "Hidden synthetic windows; model-update CPU and dispatcher scheduling only, not GPU frame rate or interactive user input."
+        };
+        var resultPath = Path.Combine(f.DirectoryPath, "soak-result.json");
+        File.WriteAllText(resultPath, JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
+        Console.WriteLine("SOAK RESULT " + resultPath); Console.WriteLine(JsonSerializer.Serialize(result));
+    }
+
     private sealed class Fixture : IDisposable
     {
         public readonly string DirectoryPath;
         public readonly MainWindow Window;
         private readonly string history;
+        private bool closed;
         public FocusStore Store => Field<FocusStore>(Window, "store");
         public BridgeState Bridge => Field<BridgeState>(Field<LocalBridge>(Window, "bridge"), "state");
         public FocusSession Current => Store.GetSessions().Single(s => s.Task == "strict test");
@@ -382,15 +665,20 @@ internal static class Program
             history = Snapshot(historicalOnly: true);
             typeof(App).GetProperty(nameof(App.DataDirectory))!.SetValue(null, DirectoryPath);
             Window = new MainWindow(); Field<DispatcherTimer>(Window, "timer").Stop();
+            Window.Closed += (_, _) => closed = true;
             Field<TextBox>(Window, "TaskInput").Text = "strict test";
             Confirm(_ => true);
+            Drain();
         }
         public void Confirm(Func<int, bool> answer) => SetField(Window, "strictStartConfirmation", answer);
-        public void Start() { Call(Window, "Begin", false); Assert(Field<object?>(Window, "clock") is not null); }
-        public void Tick(double seconds)
+        public void Start() { Call(Window, "Begin", false); Drain(); Assert(Field<object?>(Window, "clock") is not null); }
+        public void Drain() => Call(Window, "WaitForBackgroundAsync");
+        public void DrainFocus() => Call(Window, "DrainFocusAsync");
+        public void Tick(double seconds, bool waitForFocus = true)
         {
             SetField(Window, "lastTimestamp", Stopwatch.GetTimestamp() - (long)(Stopwatch.Frequency * seconds));
             Call(Window, "Tick", null!, EventArgs.Empty);
+            if (waitForFocus) DrainFocus();
         }
         public long CurrentDaySeconds()
         {
@@ -400,6 +688,7 @@ internal static class Program
         }
         public void AssertReleased(string status, int seconds, long days)
         {
+            DrainFocus();
             Assert(Field<object?>(Window, "clock") is null); Assert(!Field<bool>(Window, "activeStrictFocus"));
             Assert(!Bridge.active); Equal(status, Current.Status); Equal(seconds, Current.ElapsedSeconds); Equal(days, CurrentDaySeconds());
             Assert(Field<FrameworkElement>(Window, "SetupPanel").IsEnabled);
@@ -420,8 +709,9 @@ internal static class Program
         }
         public void Dispose()
         {
+            if (closed) return;
             Field<DispatcherTimer>(Window, "timer").Stop();
-            Window.ReleaseForError(); Window.Close();
+            Window.ReleaseForError(); Call(Window, "PrepareCloseAsync"); Window.Close();
         }
     }
 
@@ -429,6 +719,7 @@ internal static class Program
     {
         object[] args = [nint.Zero, 0x0312, (nint)id, nint.Zero, false];
         typeof(MainWindow).GetMethod("WindowHook", Private)!.Invoke(window, args);
+        Call(window, "DrainFocusAsync");
         return (bool)args[4];
     }
     private static Window CreateImmersion(bool strict, Action callback)
@@ -483,9 +774,54 @@ internal static class Program
         Assert(Application.Current.Windows.OfType<Window>().All(window => !window.IsVisible));
     }
     private static T Field<T>(object instance, string name) => (T)instance.GetType().GetField(name, Private)!.GetValue(instance)!;
+    private static T Property<T>(object instance, string name) => (T)instance.GetType().GetProperty(name, Private | BindingFlags.Public)!.GetValue(instance)!;
+    private static SqliteConnection OpenWriterLock(string path)
+    {
+        var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false, DefaultTimeout = 1 }.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand(); command.CommandText = "BEGIN IMMEDIATE"; command.ExecuteNonQuery();
+        return connection;
+    }
+    private static void Rollback(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand(); command.CommandText = "ROLLBACK"; command.ExecuteNonQuery();
+    }
+    private static Dictionary<string, StackPanel> UsagePanels(MainWindow window)
+        => Field<StackPanel>(window, "UsageRows").Children.OfType<StackPanel>().ToDictionary(
+            panel => ((TextBlock)((DockPanel)panel.Children[0]).Children[1]).ToolTip.ToString()!, panel => panel);
     private static void SetField(object instance, string name, object? value) => instance.GetType().GetField(name, Private)!.SetValue(instance, value);
-    private static object? Call(object instance, string name, params object[] values)
+    private static object? Invoke(object instance, string name, params object[] values)
         => instance.GetType().GetMethod(name, Private | BindingFlags.Public)!.Invoke(instance, values);
+    private static object? Call(object instance, string name, params object[] values)
+    {
+        if (instance is MainWindow && name == "RefreshPlanet") name = "RefreshPlanetAsync";
+        var wasStarting = instance is MainWindow && Field<bool>(instance, "startingFocus");
+        var result = Invoke(instance, name, values);
+        if (result is Task task)
+        {
+            Wait(task);
+            return task.GetType().GetProperty("Result")?.GetValue(task);
+        }
+        // The production click handler remains async void; await its actual work without
+        // changing its code path or pumping recursively inside strict confirmation.
+        if (instance is MainWindow && name == "StartBreak" && !wasStarting)
+            WaitUntil(() => !Field<bool>(instance, "startingFocus"));
+        return result;
+    }
+    private static void Wait(Task task, int timeoutSeconds = 30)
+    {
+        WaitUntil(() => task.IsCompleted, timeoutSeconds);
+        task.GetAwaiter().GetResult();
+    }
+    private static void WaitUntil(Func<bool> completed, int timeoutSeconds = 30)
+    {
+        var watch = Stopwatch.StartNew();
+        while (!completed())
+        {
+            if (watch.Elapsed > TimeSpan.FromSeconds(timeoutSeconds)) throw new TimeoutException("Synthetic dispatcher wait exceeded its deadline.");
+            Pump(); Thread.Sleep(1);
+        }
+    }
     private static void Assert(bool condition) { if (!condition) throw new Exception("Assertion failed."); }
     private static void Equal<T>(T expected, T actual) { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new Exception($"Expected {expected}, got {actual}."); }
     private static void Render(Window window, string name, int width = 1380, int height = 1040)
