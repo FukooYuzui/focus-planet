@@ -67,7 +67,7 @@ public partial class MainWindow : Window
         SystemEvents.PowerModeChanged += PowerChanged;
         SystemEvents.SessionSwitch += SessionChanged;
         Closing += ClosingWindow;
-        Closed += (_, _) => { shuttingDown = true; timer.Stop(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); bridge.Dispose(); };
+        Closed += (_, _) => { shuttingDown = true; timer.Stop(); ReleaseWorkspace(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); bridge.Dispose(); };
         InitializeDashboard();
         InitializePlanet();
         RefreshStatistics();
@@ -86,6 +86,7 @@ public partial class MainWindow : Window
     {
         FocusMinutesInput.Text = settings.FocusMinutes.ToString(); BreakMinutesInput.Text = settings.BreakMinutes.ToString(); ImmersiveCheck.IsChecked = settings.Immersive;
         StrictFocusCheck.IsChecked = settings.StrictFocus;
+        LoadWorkspaceSettings();
         AppsInput.Text = string.Join(Environment.NewLine, settings.BlockedApps); DomainsInput.Text = string.Join(Environment.NewLine, settings.BlockedDomains);
         TimerText.Text = FormatTime(settings.FocusMinutes * 60);
     }
@@ -150,9 +151,13 @@ public partial class MainWindow : Window
             if (!int.TryParse(BreakMinutesInput.Text, out var rest) || rest < 1 || rest > 60) throw new ArgumentException("休息时长请输入 1–60 分钟。");
             var apps = Lines(AppsInput.Text).Select(AppRules.Normalize).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
             if (apps.Any(n => NativeFocus.Protected.Contains(n))) throw new ArgumentException("不能限制系统桌面、任务管理器或专注星球等逃生应用。");
-            var candidate = new FocusSettings { FocusMinutes = focus, BreakMinutes = rest, Immersive = ImmersiveCheck.IsChecked == true, StrictFocus = StrictFocusCheck.IsChecked == true, BlockedApps = apps, BlockedDomains = Lines(DomainsInput.Text).Select(DomainRules.Normalize).Distinct().ToArray() };
+            var candidate = new FocusSettings { FocusMinutes = focus, BreakMinutes = rest, Immersive = ImmersiveCheck.IsChecked == true, StrictFocus = StrictFocusCheck.IsChecked == true,
+                WhitelistEnabled = WhitelistEnabledCheck.IsChecked == true, AllowedApps = Lines(AllowedAppsInput.Text).Select(AppRules.NormalizeAllowed).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                HideTaskbar = HideTaskbarCheck.IsChecked == true, BlockDesktopShortcuts = BlockDesktopShortcutsCheck.IsChecked == true,
+                BlockedApps = apps, BlockedDomains = Lines(DomainsInput.Text).Select(DomainRules.Normalize).Distinct().ToArray() };
             await focusWork.RunAsync(() => store.SaveSettings(candidate)); settings = candidate;
             AppsInput.Text = string.Join(Environment.NewLine, settings.BlockedApps); DomainsInput.Text = string.Join(Environment.NewLine, settings.BlockedDomains);
+            AllowedAppsInput.Text = string.Join(Environment.NewLine, settings.AllowedApps);
             return true;
         }
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "请检查设置", MessageBoxButton.OK, MessageBoxImage.Information); return false; }
@@ -170,12 +175,13 @@ public partial class MainWindow : Window
         if (clock != null || startingFocus || endingFocus || savingSettings || shuttingDown || travellingPlanet || desktopLocked || powerSuspended) return;
         var generation = Volatile.Read(ref sessionEventGeneration);
         startingFocus = true;
-        SetupPanel.IsEnabled = false;
+        SetupPanel.IsEnabled = false; WhitelistSettingsPanel.IsEnabled = false;
         try
         {
             if (!await SaveAllSettings()) return;
             if (StartWasInterrupted(generation)) return;
             plannedSeconds = shortTest ? 10 : settings.FocusMinutes * 60;
+            var applicationPolicy = FocusApplicationPolicy.Create(settings);
             // Capture the choice once: a session cannot unlock itself through later settings changes.
             var strictForSession = settings.StrictFocus;
             if (strictForSession && !strictStartConfirmation(plannedSeconds))
@@ -199,13 +205,13 @@ public partial class MainWindow : Window
             catch (Exception ex) { Status("无法保存记录，未开启限制：" + ex.Message); return; }
             if (StartWasInterrupted(generation))
             {
-                var cancelledId = sessionId.Value;
-                sessionId = null; sessionWriter = null;
-                try
-                {
-                    await focusWork.RunAsync(() => { store.EndSession(cancelledId, "interrupted", DateTimeOffset.Now); Interlocked.Increment(ref focusDataRevision); });
-                }
-                catch (Exception error) { Status("开始已取消，零秒记录将在下次启动恢复为中断：" + error.Message); }
+                await CancelUnstartedSessionAsync();
+                return;
+            }
+            if (!await PrepareWorkspaceAsync(applicationPolicy, generation) || StartWasInterrupted(generation))
+            {
+                ReleaseWorkspace();
+                await CancelUnstartedSessionAsync();
                 return;
             }
             clock = new FocusClock(plannedSeconds); breaking = false; activeStrictFocus = strictForSession;
@@ -214,7 +220,16 @@ public partial class MainWindow : Window
             SetActiveUi(true); UpdateTimer(); RefreshStatistics(); Page("focus");
             bridge.Publish(true, settings.BlockedDomains, clock.RemainingSeconds);
             Status(activeStrictFocus ? "严格专注已开始；本轮程序内提前退出已禁用，计时结束后恢复。" : settings.BlockedDomains.Length > 0 ? "专注已开始；网站限制需要已连接的浏览器扩展。" : hotkeyRegistered ? "专注已开始；Ctrl + Alt + Esc 可立即退出。" : "专注已开始；可使用紧急退出按钮（快捷键被占用）。");
-            if (settings.Immersive) EnterFullscreen();
+            if (workspaceSession != null)
+            {
+                try
+                {
+                    ShowWorkspaceDock();
+                    Status("白名单专注已开始，通过浮动面板切换允许的应用。" + (activeStrictFocus ? "本轮到时恢复退出。" : "可在面板或主窗口结束本轮。"));
+                }
+                catch (Exception error) { Finish("interrupted", "白名单面板未能启动，限制已解除：" + error.Message); }
+            }
+            else if (settings.Immersive) EnterFullscreen();
         }
         finally { startingFocus = false; if (clock == null) SetActiveUi(false); }
     }
@@ -246,8 +261,9 @@ public partial class MainWindow : Window
         EmergencyButton.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         EmergencyButton.IsEnabled = !IsStrictFocusActive;
         EmergencyButton.Content = IsStrictFocusActive ? "提前退出已禁用" : breaking ? "结束休息" : "紧急退出";
-        FullscreenButton.Visibility = active && !breaking ? Visibility.Visible : Visibility.Collapsed;
+        FullscreenButton.Visibility = active && !breaking && workspaceSession == null ? Visibility.Visible : Visibility.Collapsed;
         SetupPanel.IsEnabled = !active; TaskInput.IsEnabled = !active; AppsInput.IsEnabled = !active; DomainsInput.IsEnabled = !active;
+        WhitelistSettingsPanel.IsEnabled = !active && !shuttingDown;
         ChooseBackgroundButton.IsEnabled = !active; ResetBackgroundButton.IsEnabled = !active && appearance.BackgroundImage != null;
         RefreshExitHint();
     }
@@ -301,8 +317,12 @@ public partial class MainWindow : Window
         if (!breaking)
         {
             bridge.Publish(true, settings.BlockedDomains, clock.RemainingSeconds);
-            var blocked = NativeFocus.BlockForeground(settings.BlockedApps);
-            if (blocked != null) { Status("已拦截 " + blocked + (IsStrictFocusActive ? "，进程和文件仍保留；严格专注计时结束后解除。" : "，进程和文件仍保留。紧急退出可解除。")); if (immersion == null) { WindowState = WindowState.Normal; Activate(); } }
+            if (workspaceSession != null) PulseWorkspace();
+            else
+            {
+                var blocked = NativeFocus.BlockForeground(settings.BlockedApps);
+                if (blocked != null) { Status("已拦截 " + blocked + (IsStrictFocusActive ? "，进程和文件仍保留；严格专注计时结束后解除。" : "，进程和文件仍保留。紧急退出可解除。")); if (immersion == null) { WindowState = WindowState.Normal; Activate(); } }
+            }
         }
     }
     private void UpdateTimer()
@@ -316,7 +336,7 @@ public partial class MainWindow : Window
     private void EnterFullscreenClick(object sender, RoutedEventArgs e) => EnterFullscreen();
     private void EnterFullscreen()
     {
-        if (clock == null || breaking || immersion != null) return;
+        if (clock == null || breaking || immersion != null || workspaceSession != null) return;
         immersion = new ImmersionWindow(currentTask, hotkeyRegistered, appearance.BackgroundImage, ConfirmEmergency, IsStrictFocusActive) { Owner = this };
         immersion.UpdateTime(FormatTime(clock.RemainingSeconds)); immersion.Show();
     }
@@ -340,6 +360,8 @@ public partial class MainWindow : Window
         var writer = sessionWriter; sessionWriter = null;
         clock = null; sessionId = null; breaking = false; activeStrictFocus = false;
         bridge.Publish(false, [], 0);
+        ReleaseWorkspace();
+        if (workspaceReleaseWarning != null) { message += " " + workspaceReleaseWarning; workspaceReleaseWarning = null; }
         immersion?.Release(); immersion = null; SetActiveUi(false);
         Title = $"专注星球 {App.CurrentVersion} · Focus Planet" + (App.TestMode ? " [独立验收模式]" : "");
         SessionLabel.Text = status == "completed" ? "完成一段，让专注慢慢生长。" : "下一次，继续从这里开始。";
@@ -355,14 +377,14 @@ public partial class MainWindow : Window
     public void ReleaseForError()
     {
         if (clock != null) Finish("interrupted", "本轮已中断，限制已解除，已保存的时长保留。");
-        else { bridge.Publish(false, [], 0); immersion?.Release(); immersion = null; activeStrictFocus = false; }
+        else { bridge.Publish(false, [], 0); ReleaseWorkspace(); immersion?.Release(); immersion = null; activeStrictFocus = false; }
     }
     private void PowerChanged(object sender, PowerModeChangedEventArgs e)
     {
         if (e.Mode == PowerModes.Suspend) Interlocked.Increment(ref sessionEventGeneration);
         Dispatcher.BeginInvoke(() =>
         {
-            if (e.Mode == PowerModes.Suspend) { powerSuspended = true; if (dashboardReady) usageTracker.IsSessionLocked = true; Finish("interrupted", "电脑进入休眠，本轮已中断并解除限制。"); }
+            if (e.Mode == PowerModes.Suspend) { powerSuspended = true; workspaceStartCancellation?.Cancel(); if (dashboardReady) usageTracker.IsSessionLocked = true; Finish("interrupted", "电脑进入休眠，本轮已中断并解除限制。"); }
             else if (e.Mode == PowerModes.Resume) { powerSuspended = false; if (dashboardReady) usageTracker.IsSessionLocked = desktopLocked; }
         });
     }
@@ -371,7 +393,7 @@ public partial class MainWindow : Window
         if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff) Interlocked.Increment(ref sessionEventGeneration);
         Dispatcher.BeginInvoke(() =>
         {
-            if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff) { desktopLocked = true; if (dashboardReady) usageTracker.IsSessionLocked = true; Finish("interrupted", "系统锁定或注销，本轮已中断。"); }
+            if (e.Reason is SessionSwitchReason.SessionLock or SessionSwitchReason.SessionLogoff) { desktopLocked = true; workspaceStartCancellation?.Cancel(); if (dashboardReady) usageTracker.IsSessionLocked = true; Finish("interrupted", "系统锁定或注销，本轮已中断。"); }
             else if (e.Reason is SessionSwitchReason.SessionUnlock or SessionSwitchReason.SessionLogon) { desktopLocked = false; if (dashboardReady) usageTracker.IsSessionLocked = powerSuspended; }
         });
     }

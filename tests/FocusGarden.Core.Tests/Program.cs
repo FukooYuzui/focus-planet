@@ -87,11 +87,113 @@ Run("legacy settings without strict-focus stay optional and preserve saved secon
     using var reopened = new FocusStore(db);
     var old = reopened.LoadSettings();
     Equal(false, old.StrictFocus); Equal(40, old.FocusMinutes); Equal(false, old.Immersive);
+    Equal(false, old.WhitelistEnabled); Equal(0, old.AllowedApps.Length);
+    Equal(true, old.HideTaskbar); Equal(true, old.BlockDesktopShortcuts);
     old.StrictFocus = true; reopened.SaveSettings(old);
     Equal(true, reopened.LoadSettings().StrictFocus);
     Equal(id, reopened.GetSessions().Single().Id);
     Equal(17, reopened.GetSessions().Single().ElapsedSeconds);
     Equal(17, reopened.GetDailyTotals(2026).Values.Sum());
+});
+
+Run("whitelist preferences round-trip without changing focus rows or other restriction settings", () =>
+{
+    var db = Path.Combine(basePath, "whitelist-settings.db");
+    string before;
+    using (var store = new FocusStore(db))
+    {
+        var start = Local(2026, 10, 27, 9);
+        var id = store.BeginSession("history before whitelist", 60, start);
+        store.AddProgress(id, 17, start.AddSeconds(17));
+        store.EndSession(id, "emergency", start.AddSeconds(17));
+        before = System.Text.Json.JsonSerializer.Serialize(store.GetSessions());
+        store.SaveSettings(new FocusSettings
+        {
+            FocusMinutes = 40, BreakMinutes = 8, Immersive = false, StrictFocus = true,
+            WhitelistEnabled = true, AllowedApps = [" WINWORD.EXE ", "winword", "Codex.exe", "ChatGPT", "powershell.exe"],
+            HideTaskbar = false, BlockDesktopShortcuts = false,
+            BlockedApps = ["notepad.exe"], BlockedDomains = ["example.com"]
+        });
+    }
+    using var reopened = new FocusStore(db);
+    var settings = reopened.LoadSettings();
+    Equal(true, settings.WhitelistEnabled); Equal(true, settings.StrictFocus);
+    Equal(false, settings.HideTaskbar); Equal(false, settings.BlockDesktopShortcuts);
+    Equal("winword,codex,chatgpt,powershell", string.Join(',', settings.AllowedApps));
+    Equal("notepad", settings.BlockedApps.Single()); Equal("example.com", settings.BlockedDomains.Single());
+    Equal(before, System.Text.Json.JsonSerializer.Serialize(reopened.GetSessions()));
+    Equal(17, reopened.GetDailyTotals(2026).Values.Sum());
+    settings.WhitelistEnabled = false; reopened.SaveSettings(settings);
+    var disabled = reopened.LoadSettings();
+    Equal(false, disabled.WhitelistEnabled); Equal(4, disabled.AllowedApps.Length);
+});
+
+Run("invalid active whitelist preserves the previous saved settings and permits a disabled empty list", () =>
+{
+    using var store = new FocusStore(":memory:");
+    store.SaveSettings(new FocusSettings { FocusMinutes = 47, WhitelistEnabled = true, AllowedApps = ["winword.exe"] });
+    foreach (var names in new string[][] { [], [" "], ["*.exe"], ["C:\\app.exe"], ["explorer"], ["svchost"], ["applicationframehost"], Enumerable.Repeat("notepad", 101).ToArray() })
+        Throws<ArgumentException>(() => store.SaveSettings(new FocusSettings { WhitelistEnabled = true, AllowedApps = names }));
+    Throws<ArgumentException>(() => store.SaveSettings(new FocusSettings { AllowedApps = null! }));
+    var unchanged = store.LoadSettings();
+    Equal(47, unchanged.FocusMinutes); Equal(true, unchanged.WhitelistEnabled); Equal("winword", unchanged.AllowedApps.Single());
+    store.SaveSettings(new FocusSettings { WhitelistEnabled = false, AllowedApps = [] });
+    Equal(0, store.LoadSettings().AllowedApps.Length);
+});
+
+Run("allowlist normalization selects concrete apps independently of blacklist recovery exemptions", () =>
+{
+    Equal("codex", AppRules.NormalizeAllowed(" Codex.EXE "));
+    Equal("chatgpt", AppRules.NormalizeAllowed("ChatGPT"));
+    Equal("powershell", AppRules.NormalizeAllowed("PowerShell.exe"));
+    Equal("my app", AppRules.NormalizeAllowed("My App.exe"));
+    Throws<ArgumentException>(() => AppRules.Normalize("powershell"));
+    foreach (var name in new[] { "", "..", "*", "../app", "C:\\app.exe", "explorer.exe", "shellexperiencehost", "startmenuexperiencehost", "searchhost", "svchost.exe", "applicationframehost", "runtimebroker", "dllhost", "conhost" })
+        Throws<ArgumentException>(() => AppRules.NormalizeAllowed(name));
+});
+
+Run("whitelist policy matches exact names and exempts only its own process or true safety interfaces", () =>
+{
+    var policy = FocusApplicationPolicy.Create(new FocusSettings { WhitelistEnabled = true, AllowedApps = ["WinWord.EXE", "codex"] });
+    Assert(policy.IsAllowed("WINWORD")); Assert(policy.IsAllowed("codex.exe"));
+    foreach (var name in new[] { "winword-helper", "mycodex", "chatgpt", "chrome", "explorer", "systemsettings", "applicationframehost", "cmd", "powershell", "pwsh", "windowsterminal", "focusgarden" })
+        Assert(!policy.IsAllowed(name));
+    Assert(policy.IsAllowed("focusgarden", isOwnProcess: true));
+    foreach (var name in new[] { "taskmgr", "logonui", "winlogon", "lockapp", "consent" })
+    {
+        Assert(policy.IsAllowed(name.ToUpperInvariant() + ".exe"));
+        Assert(FocusApplicationPolicy.IsSystemSafetyApp(name));
+        Assert(!FocusApplicationPolicy.IsSystemSafetyApp(name + "-helper"));
+    }
+    Assert(!FocusApplicationPolicy.IsSystemSafetyApp("explorer"));
+});
+
+Run("a running application policy is immutable despite later settings or list mutations", () =>
+{
+    var settings = new FocusSettings
+    {
+        WhitelistEnabled = true, AllowedApps = ["notepad.exe"],
+        HideTaskbar = true, BlockDesktopShortcuts = true, BlockedApps = ["chrome"]
+    };
+    var policy = FocusApplicationPolicy.Create(settings);
+    settings.AllowedApps[0] = "chrome"; settings.BlockedApps[0] = "notepad";
+    settings.WhitelistEnabled = false; settings.HideTaskbar = false; settings.BlockDesktopShortcuts = false;
+    Assert(policy.WhitelistEnabled && policy.HideTaskbar && policy.BlockDesktopShortcuts);
+    Assert(policy.IsAllowed("notepad")); Assert(!policy.IsAllowed("chrome"));
+    Throws<NotSupportedException>(() => ((IList<string>)policy.AllowedApps)[0] = "chrome");
+    Equal("notepad", policy.AllowedApps.Single());
+});
+
+Run("desktop controls are inactive outside whitelist mode and empty enabled policies cannot start", () =>
+{
+    var policy = FocusApplicationPolicy.Create(new FocusSettings { BlockedApps = ["notepad.exe"] });
+    Assert(!policy.WhitelistEnabled && !policy.HideTaskbar && !policy.BlockDesktopShortcuts);
+    Assert(!policy.IsAllowed("notepad")); Assert(policy.IsAllowed("chrome")); Assert(policy.IsAllowed("powershell"));
+    Throws<ArgumentException>(() => FocusApplicationPolicy.Create(new FocusSettings { WhitelistEnabled = true }));
+    Throws<ArgumentException>(() => FocusApplicationPolicy.Create(new FocusSettings { WhitelistEnabled = true, AllowedApps = [" "] }));
+    var explicitTerminal = FocusApplicationPolicy.Create(new FocusSettings { WhitelistEnabled = true, AllowedApps = ["powershell.exe"], HideTaskbar = false, BlockDesktopShortcuts = false });
+    Assert(explicitTerminal.IsAllowed("powershell")); Assert(!explicitTerminal.IsAllowed("cmd"));
+    Assert(!explicitTerminal.HideTaskbar && !explicitTerminal.BlockDesktopShortcuts);
 });
 
 Run("normal completion persists exactly planned duration", () =>

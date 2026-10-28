@@ -6,6 +6,10 @@ public sealed class FocusSettings
     public int BreakMinutes { get; set; } = 5;
     public bool Immersive { get; set; } = true;
     public bool StrictFocus { get; set; }
+    public bool WhitelistEnabled { get; set; }
+    public string[] AllowedApps { get; set; } = [];
+    public bool HideTaskbar { get; set; } = true;
+    public bool BlockDesktopShortcuts { get; set; } = true;
     public string[] BlockedApps { get; set; } = [];
     public string[] BlockedDomains { get; set; } = [];
 }

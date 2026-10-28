@@ -517,6 +517,7 @@ internal static class Program
                 Equal(0, Directory.GetFiles(f.DirectoryPath, ".focus-export-*.tmp").Length);
                 Equal(snapshot, f.AllRows()); f.AssertHistory();
             });
+            RunWorkspaceCases();
         }
         finally { app.Shutdown(); }
         Console.WriteLine($"Strict focus: {passed} passed, {failed} failed; synthetic fixtures: {Root}");
@@ -527,6 +528,257 @@ internal static class Program
     {
         try { body(); passed++; Console.WriteLine("PASS " + name); }
         catch (Exception exception) { failed++; Console.WriteLine("FAIL " + name + ": " + exception); }
+    }
+
+    private static void RunWorkspaceCases()
+    {
+        Run("whitelist is disabled for legacy settings and ordinary focus never creates a workspace guard", () =>
+        {
+            using var f = new Fixture(false, legacyJson: true);
+            var settings = Field<FocusSettings>(f.Window, "settings");
+            Assert(!settings.WhitelistEnabled && settings.AllowedApps.Length == 0);
+            SetWorkspaceFactory(f, (_, _, _) => throw new Exception("Disabled whitelist invoked its native guard."));
+            f.Start(); f.Tick(1.1); Assert(SendHotkey(f.Window, 9081));
+            f.AssertReleased("emergency", 1, 1); f.AssertHistory();
+        });
+
+        Run("whitelist start captures multiple applications and suppresses immersive fullscreen for this session", () =>
+        {
+            using var f = new Fixture();
+            ConfigureWhitelist(f);
+            Field<CheckBox>(f.Window, "ImmersiveCheck").IsChecked = true;
+            var guard = new FakeWorkspaceSession(); FocusApplicationPolicy? policy = null; int starts = 0;
+            SetWorkspaceFactory(f, (snapshot, _, _) => { starts++; policy = snapshot; return Task.FromResult<IFocusWorkspaceSession>(guard); });
+            Call(f.Window, "Page", "rules");
+            var running = Field<ComboBox>(f.Window, "RunningAllowedApps");
+            running.ItemsSource = new[] { "synthetic-editor.exe", "synthetic-reader.exe" }; running.SelectedIndex = 0;
+            Render(f.Window, "whitelist-settings-960.png", 960, 900);
+            Call(f.Window, "Page", "focus"); f.Drain();
+            Render(f.Window, "whitelist-focus-ready-960.png", 960, 900);
+            f.Start();
+            Equal(1, starts); Assert(policy is not null && policy.WhitelistEnabled && policy.HideTaskbar && policy.BlockDesktopShortcuts);
+            Assert(policy!.AllowedApps.SequenceEqual(new[] { "synthetic-editor", "synthetic-reader" }));
+            Assert(ReferenceEquals(guard, Field<IFocusWorkspaceSession?>(f.Window, "workspaceSession")));
+            var dock = Field<WorkspaceDockWindow>(f.Window, "workspaceDock");
+            Assert(dock.Owner is null && !dock.IsVisible);
+            Assert(!f.Window.OwnedWindows.OfType<Window>().Contains(dock));
+            Render(f.Window, "whitelist-focus-active-960.png", 960, 900);
+            Assert(Field<object?>(f.Window, "immersion") is null);
+            Equal(Visibility.Collapsed, Field<Button>(f.Window, "FullscreenButton").Visibility);
+            Assert(!Field<CheckBox>(f.Window, "WhitelistEnabledCheck").IsEnabled);
+            Assert(!Field<TextBox>(f.Window, "AllowedAppsInput").IsEnabled);
+            Call(f.Window, "EnterFullscreen");
+            Assert(Field<object?>(f.Window, "immersion") is null);
+            var settings = Field<FocusSettings>(f.Window, "settings");
+            settings.AllowedApps[0] = "changed"; settings.WhitelistEnabled = false; settings.HideTaskbar = false;
+            Field<TextBox>(f.Window, "AllowedAppsInput").Text = "changed.exe";
+            Field<CheckBox>(f.Window, "WhitelistEnabledCheck").IsChecked = false;
+            f.Tick(1.1);
+            Assert(guard.PulseCalls > 0 && policy.IsAllowed("synthetic-editor.exe") && !policy.IsAllowed("changed.exe"));
+            Assert(SendHotkey(f.Window, 9081)); Assert(Field<object?>(f.Window, "clock") is not null);
+            Equal(0, guard.DisposeCalls);
+            for (var i = 0; i < 25 && Field<object?>(f.Window, "clock") is not null; i++) f.Tick(3.05);
+            f.AssertReleased("completed", 60, 60); Equal(1, guard.DisposeCalls);
+            Assert(Field<IFocusWorkspaceSession?>(f.Window, "workspaceSession") is null);
+            f.AssertHistory();
+        });
+
+        Run("whitelist preparation failure retains a zero-second interrupted record and never enables restrictions", () =>
+        {
+            using var f = new Fixture(); ConfigureWhitelist(f);
+            SetWorkspaceFactory(f, (_, _, _) => Task.FromException<IFocusWorkspaceSession>(new InvalidOperationException("synthetic no allowed window")));
+            Call(f.Window, "Begin", false); f.Drain();
+            f.AssertReleased("interrupted", 0, 0);
+            Assert(Field<IFocusWorkspaceSession?>(f.Window, "workspaceSession") is null);
+            Assert(Field<object?>(f.Window, "immersion") is null);
+            Assert(!Field<bool>(f.Window, "startingFocus")); f.AssertHistory();
+        });
+
+        Run("lock and unlock during asynchronous whitelist preparation cancel the returned guard before any focus starts", () =>
+        {
+            using var f = new Fixture(); ConfigureWhitelist(f);
+            var prepared = new TaskCompletionSource<IFocusWorkspaceSession>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var guard = new FakeWorkspaceSession(); int starts = 0; CancellationToken preparationToken = default;
+            SetWorkspaceFactory(f, (_, _, token) => { starts++; preparationToken = token; return prepared.Task; });
+            var start = (Task)Invoke(f.Window, "Begin", false)!;
+            WaitUntil(() => starts == 1);
+            Assert(Field<object?>(f.Window, "clock") is null && !f.Bridge.active);
+            Call(f.Window, "SessionChanged", f.Window, new SessionSwitchEventArgs(SessionSwitchReason.SessionLock)); Pump();
+            Call(f.Window, "SessionChanged", f.Window, new SessionSwitchEventArgs(SessionSwitchReason.SessionUnlock)); Pump();
+            Assert(preparationToken.IsCancellationRequested);
+            prepared.SetResult(guard); Wait(start); f.Drain();
+            f.AssertReleased("interrupted", 0, 0); Equal(1, guard.DisposeCalls);
+            Assert(Field<IFocusWorkspaceSession?>(f.Window, "workspaceSession") is null);
+            Assert(!Field<bool>(f.Window, "startingFocus")); f.AssertHistory();
+        });
+
+        Run("error recovery cancels preparation even when the factory ignores cancellation and returns a late guard", () =>
+        {
+            using var f = new Fixture(); ConfigureWhitelist(f);
+            var prepared = new TaskCompletionSource<IFocusWorkspaceSession>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var guard = new FakeWorkspaceSession(); int starts = 0; CancellationToken preparationToken = default;
+            SetWorkspaceFactory(f, (_, _, token) => { starts++; preparationToken = token; return prepared.Task; });
+            var start = (Task)Invoke(f.Window, "Begin", false)!;
+            WaitUntil(() => starts == 1);
+            var generation = Field<long>(f.Window, "sessionEventGeneration");
+            f.Window.ReleaseForError();
+            Assert(preparationToken.IsCancellationRequested);
+            Equal(generation, Field<long>(f.Window, "sessionEventGeneration"));
+            Assert(Field<object?>(f.Window, "clock") is null && !f.Bridge.active);
+            prepared.SetResult(guard); Wait(start); f.Drain();
+            f.AssertReleased("interrupted", 0, 0); Equal(1, guard.DisposeCalls);
+            Assert(Field<IFocusWorkspaceSession?>(f.Window, "workspaceSession") is null);
+            Assert(Field<WorkspaceDockWindow?>(f.Window, "workspaceDock") is null);
+            Assert(Field<CancellationTokenSource?>(f.Window, "workspaceStartCancellation") is null);
+            Assert(!Field<bool>(f.Window, "startingFocus"));
+            f.Window.ReleaseForError(); Equal(1, guard.DisposeCalls); f.AssertHistory();
+        });
+
+        Run("ordinary whitelist focus releases the guard through the existing emergency shortcut", () =>
+        {
+            using var f = new Fixture(false); ConfigureWhitelist(f);
+            var guard = new FakeWorkspaceSession();
+            SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
+            f.Start(); f.Tick(2.1); Assert(SendHotkey(f.Window, 9081));
+            f.AssertReleased("emergency", 2, 2); Equal(1, guard.DisposeCalls);
+            f.Window.ReleaseForError(); Equal(1, guard.DisposeCalls); f.AssertHistory();
+        });
+
+        foreach (var reason in new[] { SessionSwitchReason.SessionLock, SessionSwitchReason.SessionLogoff })
+            Run("whitelist " + reason + " restores the workspace before asynchronous session persistence", () =>
+            {
+                using var f = new Fixture(); ConfigureWhitelist(f);
+                var guard = new FakeWorkspaceSession();
+                SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
+                f.Start(); f.Tick(2.1);
+                using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+                var queue = Field<SerialWorkQueue>(f.Window, "focusWork");
+                var blocker = queue.RunAsync(() => { entered.Set(); release.Wait(); }); WaitUntil(() => entered.IsSet);
+                try
+                {
+                    Call(f.Window, "SessionChanged", f.Window, new SessionSwitchEventArgs(reason)); Pump();
+                    Equal(1, guard.DisposeCalls); Assert(Field<object?>(f.Window, "clock") is null && !f.Bridge.active);
+                    Assert(!Field<Task>(f.Window, "finishTask").IsCompleted);
+                }
+                finally { release.Set(); }
+                Wait(blocker); f.AssertReleased("interrupted", 2, 2); f.AssertHistory();
+            });
+
+        Run("whitelist suspend releases its guard and a later resume cannot silently restart the session", () =>
+        {
+            using var f = new Fixture(); ConfigureWhitelist(f);
+            var guard = new FakeWorkspaceSession();
+            SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
+            f.Start(); f.Tick(2.1);
+            Call(f.Window, "PowerChanged", f.Window, new PowerModeChangedEventArgs(PowerModes.Suspend)); Pump();
+            f.AssertReleased("interrupted", 2, 2); Equal(1, guard.DisposeCalls);
+            Call(f.Window, "PowerChanged", f.Window, new PowerModeChangedEventArgs(PowerModes.Resume)); Pump();
+            Assert(Field<object?>(f.Window, "clock") is null && !f.Bridge.active);
+            f.AssertHistory();
+        });
+
+        Run("workspace monitoring failure ends strict focus and preserves its saved seconds", () =>
+        {
+            using var f = new Fixture(); ConfigureWhitelist(f);
+            var guard = new FakeWorkspaceSession();
+            SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
+            f.Start(); f.Tick(2.1); guard.FailPulse = true;
+            f.Tick(.01);
+            f.AssertReleased("interrupted", 2, 2); Equal(1, guard.DisposeCalls); f.AssertHistory();
+        });
+
+        Run("a throwing workspace disposal cannot prevent session release or duplicate saved progress", () =>
+        {
+            using var f = new Fixture(); ConfigureWhitelist(f);
+            var guard = new FakeWorkspaceSession { FailDispose = true };
+            SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
+            f.Start(); f.Tick(2.1);
+            f.Window.ReleaseForError();
+            f.AssertReleased("interrupted", 2, 2); Equal(1, guard.DisposeCalls);
+            Assert(Field<IFocusWorkspaceSession?>(f.Window, "workspaceSession") is null);
+            var saved = f.AllRows(); f.Window.ReleaseForError(); f.Drain(); Equal(saved, f.AllRows());
+            Equal(1, guard.DisposeCalls); f.AssertHistory();
+        });
+
+        Run("break mode never creates a whitelist guard or hides system surfaces", () =>
+        {
+            using var f = new Fixture(); ConfigureWhitelist(f);
+            SetWorkspaceFactory(f, (_, _, _) => throw new Exception("Break started a workspace guard."));
+            var before = f.AllRows(); Call(f.Window, "StartBreak", f.Window, new RoutedEventArgs());
+            Assert(Field<bool>(f.Window, "breaking") && Field<IFocusWorkspaceSession?>(f.Window, "workspaceSession") is null);
+            Call(f.Window, "ConfirmEmergency"); Equal(before, f.AllRows()); Assert(!f.Bridge.active);
+        });
+
+        Run("hidden workspace dock switches multiple windows, retains selection and removes closed targets without enabling strict exit", () =>
+        {
+            using var f = new Fixture();
+            var activated = new List<nint>(); int exits = 0;
+            var dock = new WorkspaceDockWindow(activated.Add, () => throw new Exception("Unexpected main-window activation."), () => exits++, true);
+            try
+            {
+                var editor = new WorkspaceWindowChoice((nint)101, "编辑器");
+                var reader = new WorkspaceWindowChoice((nint)102, "阅读器");
+                Equal("编辑器", editor.ToString()); Equal("阅读器", reader.ToString());
+                dock.SetWindows([editor, reader]);
+                var apps = Field<ComboBox>(dock, "apps");
+                var switchButton = Field<Button>(dock, "switchApp");
+                Assert(!dock.IsVisible && !Find<Button>(dock, "WorkspaceExitButton").IsEnabled);
+                Equal(2, apps.Items.Count); apps.SelectedIndex = 1;
+                switchButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Assert(activated.SequenceEqual(new[] { (nint)102 }));
+                dock.SetWindows([reader, editor]);
+                Equal((nint)102, ((WorkspaceWindowChoice)apps.SelectedItem).Handle);
+                dock.UpdateTime("00:42"); Equal("00:42", Field<TextBlock>(dock, "time").Text);
+                Assert(ReferenceEquals(dock.FindResource("Text"), Field<TextBlock>(dock, "time").Foreground));
+                Render(dock, "workspace-whitelist.png", 490, 170);
+                dock.SetWindows([editor]);
+                Equal((nint)101, ((WorkspaceWindowChoice)apps.SelectedItem).Handle);
+                switchButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Assert(activated.SequenceEqual(new[] { (nint)102, (nint)101 }));
+                dock.SetWindows([]); Assert(!switchButton.IsEnabled && apps.SelectedItem is null);
+                switchButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Equal(2, activated.Count); Equal(0, exits); Pump(); f.AssertHistory();
+            }
+            finally { dock.Release(); }
+            var ordinary = new WorkspaceDockWindow(_ => { }, () => { }, () => exits++, false);
+            try
+            {
+                var end = Find<Button>(ordinary, "WorkspaceExitButton"); Assert(end.IsEnabled);
+                end.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Equal(1, exits);
+            }
+            finally { ordinary.Release(); }
+        });
+    }
+
+    private static void ConfigureWhitelist(Fixture fixture)
+    {
+        Field<CheckBox>(fixture.Window, "WhitelistEnabledCheck").IsChecked = true;
+        Field<TextBox>(fixture.Window, "AllowedAppsInput").Text = "synthetic-editor.exe\r\nsynthetic-reader.exe";
+        Field<CheckBox>(fixture.Window, "HideTaskbarCheck").IsChecked = true;
+        Field<CheckBox>(fixture.Window, "BlockDesktopShortcutsCheck").IsChecked = true;
+    }
+
+    private static void SetWorkspaceFactory(Fixture fixture,
+        Func<FocusApplicationPolicy, nint, CancellationToken, Task<IFocusWorkspaceSession>> factory)
+        => SetField(fixture.Window, "workspaceFactory", factory);
+
+    private sealed class FakeWorkspaceSession : IFocusWorkspaceSession
+    {
+        public int DisposeCalls, PulseCalls;
+        public bool FailPulse, FailDispose;
+        public void Pulse()
+        {
+            PulseCalls++;
+            if (FailPulse) throw new IOException("synthetic workspace monitor failure");
+        }
+        public IReadOnlyList<FocusWorkspaceAppWindow> GetAllowedWindows() =>
+            [new((nint)101, "synthetic-editor"), new((nint)102, "synthetic-reader")];
+        public bool ActivateAllowedWindow(nint handle) => handle == (nint)101 || handle == (nint)102;
+        public void Dispose()
+        {
+            DisposeCalls++;
+            if (FailDispose) throw new IOException("synthetic workspace restore failure");
+        }
     }
 
     private static void Soak(int minutes)

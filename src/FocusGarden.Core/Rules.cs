@@ -38,17 +38,41 @@ public static partial class AppRules
         "shellexperiencehost", "startmenuexperiencehost", "searchhost", "applicationframehost",
         "consent", "securityhealthsystray", "systemsettings", "cmd", "powershell", "pwsh", "windowsterminal"
     };
+    // These are shell/security/service hosts, not an individual work application.
+    // A shared host name cannot grant access to all applications hosted inside it.
+    private static readonly HashSet<string> NotSelectableForWhitelist = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "explorer", "system", "idle", "registry", "secure system", "winlogon", "csrss", "lsass", "services",
+        "svchost", "smss", "dwm", "sihost", "fontdrvhost", "wininit", "logonui", "lockapp",
+        "shellexperiencehost", "startmenuexperiencehost", "searchhost", "searchapp", "applicationframehost",
+        "consent", "securityhealthsystray", "runtimebroker", "dllhost", "conhost"
+    };
 
     /// <summary>Return a process basename without .exe. Accept process names only, never executable paths.</summary>
     public static string Normalize(string value)
+    {
+        var name = NormalizeProcessName(value);
+        if (Protected.Contains(name))
+            throw new ArgumentException("不能限制系统、紧急恢复工具或番茄钟自身。", nameof(value));
+        return name;
+    }
+
+    /// <summary>Normalize an explicitly selected work app. Unlike blacklist rules, terminals are not implicitly exempt.</summary>
+    public static string NormalizeAllowed(string value)
+    {
+        var name = NormalizeProcessName(value);
+        if (NotSelectableForWhitelist.Contains(name))
+            throw new ArgumentException("白名单请选择具体工作应用，不能选择 Windows 桌面、系统服务或通用应用宿主。", nameof(value));
+        return name;
+    }
+
+    internal static string NormalizeProcessName(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
         var name = value.Trim();
         if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
         if (name.Length is 0 or > 128 || name is "." or ".." || !ProcessName().IsMatch(name))
             throw new ArgumentException("应用请填写进程名称，例如 notepad.exe；不要填写文件路径。", nameof(value));
-        if (Protected.Contains(name))
-            throw new ArgumentException("不能限制系统、紧急恢复工具或番茄钟自身。", nameof(value));
         return name.ToLowerInvariant();
     }
 

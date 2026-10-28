@@ -1,8 +1,8 @@
-<Window x:Class="FocusGarden.App.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{StaticResource {x:Type Window}}" Background="{StaticResource Bg}" Foreground="{StaticResource Text}" Title="专注星球 0.7.5 · Focus Planet" Width="1380" Height="1040" MinWidth="960" MinHeight="700" WindowStartupLocation="CenterScreen">
+<Window x:Class="FocusGarden.App.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Style="{StaticResource {x:Type Window}}" Background="{StaticResource Bg}" Foreground="{StaticResource Text}" Title="专注星球 0.8.0 · Focus Planet" Width="1380" Height="1040" MinWidth="960" MinHeight="700" WindowStartupLocation="CenterScreen">
  <Grid Margin="24" TextElement.Foreground="{StaticResource Text}"><Grid.ColumnDefinitions><ColumnDefinition Width="175"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
   <DockPanel Grid.Column="0" Margin="0,8,24,0">
    <StackPanel DockPanel.Dock="Top"><Image Source="Assets/FocusPlanet-256.png" Width="48" Height="48" HorizontalAlignment="Left" RenderOptions.BitmapScalingMode="HighQuality"/><TextBlock Text="专注星球" FontSize="23" FontWeight="Bold" Margin="0,8,0,3"/><TextBlock Text="FOCUS PLANET" FontSize="10" Foreground="{StaticResource Muted}" Margin="0,0,0,36"/><Button Content="◉   我的星球" Click="ShowPlanet" Margin="0,0,0,10" HorizontalContentAlignment="Left"/><Button Content="◷   开始专注" Click="ShowFocus" Margin="0,0,0,10" HorizontalContentAlignment="Left"/><Button Content="◴   应用时长" Click="JumpToUsage" Margin="0,0,0,10"/><Button Content="◈   Token 日历" Click="JumpToTokens" Margin="0,0,0,10"/><Button Content="▦   专注统计" Click="ShowStats" Margin="0,0,0,10"/><Button Content="☷   使用限制" Click="ShowRules" Margin="0,0,0,10"/></StackPanel>
-   <StackPanel DockPanel.Dock="Bottom" VerticalAlignment="Bottom"><TextBlock Text="一点投入，一个世界。" Foreground="{StaticResource Muted}" FontSize="12"/><TextBlock Text="本机保存 · 无需登录" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,9,0,8"/><TextBlock Text="MVP 0.7.5" Foreground="{StaticResource Muted}" FontSize="11"/></StackPanel>
+   <StackPanel DockPanel.Dock="Bottom" VerticalAlignment="Bottom"><TextBlock Text="一点投入，一个世界。" Foreground="{StaticResource Muted}" FontSize="12"/><TextBlock Text="本机保存 · 无需登录" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,9,0,8"/><TextBlock Text="MVP 0.8.0" Foreground="{StaticResource Muted}" FontSize="11"/></StackPanel>
   </DockPanel>
   <Grid Grid.Column="1"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <StackPanel Margin="0,4,0,20"><TextBlock x:Name="PageTitle" Text="把这一刻，留给重要的事。" Foreground="{StaticResource Text}" FontSize="27" FontWeight="SemiBold"/><TextBlock x:Name="PageSubtitle" Text="选一件小事，开始一段完整的专注。" Foreground="{StaticResource Muted}" Margin="0,8,0,0"/></StackPanel>
@@ -51,6 +51,8 @@
         <CheckBox x:Name="ImmersiveCheck" Content="全屏沉浸（当前屏幕）；取消勾选使用工作模式" IsChecked="True"/>
         <CheckBox x:Name="StrictFocusCheck" Content="严格专注：本轮不能提前退出" IsChecked="False"/>
         <TextBlock Text="开始前再次确认；计时期间禁用程序内提前退出，到时恢复。Windows 系统退出方式仍可使用。" Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,4"/>
+        <CheckBox x:Name="WhitelistEnabledCheck" Content="白名单专注：仅使用选择的工作应用" IsChecked="False" Click="WhitelistOptionsChanged"/>
+        <DockPanel Margin="0,0,0,6"><Button DockPanel.Dock="Right" Content="配置白名单" Click="ShowWhitelistSettings" Padding="12,7" FontSize="12" Margin="10,0,0,0"/><TextBlock x:Name="WhitelistSummary" Text="先打开要使用的应用，再将它们加入白名单。" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center"/></DockPanel>
        </StackPanel>
        <WrapPanel Margin="0,10,0,0"><Button x:Name="StartButton" Content="开始专注  →" Style="{StaticResource Primary}" Click="StartFocus"/><Button x:Name="EmergencyButton" Content="紧急退出" Click="EmergencyClick" Visibility="Collapsed"/><Button x:Name="FullscreenButton" Content="进入全屏" Click="EnterFullscreenClick" Visibility="Collapsed"/><Button x:Name="BreakButton" Content="休息一下" Click="StartBreak"/><Button x:Name="TestButton" Content="10 秒验收" Click="StartTest" Visibility="Collapsed"/></WrapPanel>
        <DockPanel Margin="0,12,0,0"><WrapPanel DockPanel.Dock="Right"><Button x:Name="ChooseBackgroundButton" Content="选择背景图片" Click="ChooseBackground" Padding="12,7" FontSize="12"/><Button x:Name="ResetBackgroundButton" Content="恢复纯色" Click="ResetBackground" Padding="12,7" FontSize="12" Margin="0"/></WrapPanel><TextBlock x:Name="BackgroundHint" Text="背景：纯色 · 主页与全屏同步" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center" Margin="0,0,12,0" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/></DockPanel>
@@ -83,8 +85,21 @@
       <StackPanel x:Name="HistoryPanel"/>
      </StackPanel>
      <StackPanel x:Name="RulesPage" Visibility="Collapsed">
+      <Border x:Name="WhitelistRulesCard" Background="{StaticResource Card}" CornerRadius="14" Padding="24" Margin="0,0,0,16"><StackPanel>
+       <TextBlock Text="白名单专注" FontSize="19" FontWeight="SemiBold"/>
+       <TextBlock Text="先打开要使用的工作应用，再加入下方列表。可以添加多个；专注时通过小型切换面板使用它们。至少有一个白名单应用正在运行才能开始。" Foreground="{StaticResource Muted}" Margin="0,8,0,12" FontSize="12"/>
+       <StackPanel x:Name="WhitelistSettingsPanel">
+        <TextBox x:Name="AllowedAppsInput" Height="84" MaxLength="10000" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" TextChanged="AllowedAppsChanged" ToolTip="每行一个进程名，例如 WINWORD.exe、chrome.exe、Codex.exe。"/>
+        <WrapPanel Margin="0,10,0,8"><ComboBox x:Name="RunningAllowedApps" Width="230" Margin="0,0,10,0"/><Button Content="刷新运行列表" Click="RefreshAllowedApps" Padding="12,7"/><Button Content="加入白名单" Click="AddAllowedApp" Padding="12,7"/></WrapPanel>
+        <CheckBox x:Name="HideTaskbarCheck" Content="专注时隐藏所有屏幕的任务栏" IsChecked="True"/>
+        <CheckBox x:Name="BlockDesktopShortcutsCheck" Content="屏蔽 Win、Alt+Tab 等桌面切换快捷键" IsChecked="True"/>
+       </StackPanel>
+       <TextBlock Text="在“开始专注”页勾选白名单专注后生效。本轮替代下方应用黑名单，并使用工作模式；网站规则仍可同时使用。程序自身、任务管理器和 Windows 安全界面保留。Ctrl+Alt+Del、Ctrl+Shift+Esc 和 Win+L 仍可使用。" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,6,0,0"/>
+       <TextBlock Text="按进程名识别应用，不验证程序签名；允许浏览器也会允许其中的其他页面。不是 Windows 安全隔离或系统级防绕过。" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,6,0,0"/>
+       <Button Content="保存白名单设置" Style="{StaticResource Primary}" HorizontalAlignment="Left" Click="SaveRules" Margin="0,16,0,0"/>
+      </StackPanel></Border>
       <Border Background="{StaticResource Card}" CornerRadius="14" Padding="24"><StackPanel>
-       <TextBlock Text="应用限制" FontSize="19" FontWeight="SemiBold"/><TextBlock Text="每行一个进程名，例如 notepad.exe。专注时切换到它会被最小化；不会关闭文件。" Foreground="{StaticResource Muted}" Margin="0,8,0,12" FontSize="12"/>
+       <TextBlock Text="应用黑名单" FontSize="19" FontWeight="SemiBold"/><TextBlock Text="未启用白名单时使用。每行一个进程名，例如 notepad.exe；专注时切换到它会被最小化，不会关闭文件。" Foreground="{StaticResource Muted}" Margin="0,8,0,12" FontSize="12"/>
        <TextBox x:Name="AppsInput" Height="84" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"/>
        <WrapPanel Margin="0,10,0,18"><ComboBox x:Name="RunningApps" Width="230" Margin="0,0,10,0"/><Button Content="刷新运行列表" Click="RefreshApps" Padding="12,7"/><Button Content="加入列表" Click="AddApp" Padding="12,7"/></WrapPanel>
        <TextBlock Text="网站新访问限制" FontSize="19" FontWeight="SemiBold"/><TextBlock Text="每行一个域名，例如 bilibili.com；包含子域。需要下方浏览器扩展，已打开的页面不会自动关闭或停止播放。" Foreground="{StaticResource Muted}" Margin="0,8,0,12" FontSize="12"/>

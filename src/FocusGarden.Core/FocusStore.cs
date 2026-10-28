@@ -312,12 +312,17 @@ public sealed class FocusStore : IDisposable
         if (settings.BreakMinutes is < 1 or > 60) throw new ArgumentException("休息时长应为 1–60 分钟。");
         if (settings.BlockedApps is null || settings.BlockedDomains is null) throw new ArgumentException("限制列表不能为空值。");
         if (settings.BlockedApps.Length > 100 || settings.BlockedDomains.Length > 200) throw new ArgumentException("限制列表过长。");
+        var allowedApps = FocusApplicationPolicy.NormalizeAllowedApps(settings.AllowedApps, settings.WhitelistEnabled);
         return new FocusSettings
         {
             FocusMinutes = settings.FocusMinutes,
             BreakMinutes = settings.BreakMinutes,
             Immersive = settings.Immersive,
             StrictFocus = settings.StrictFocus,
+            WhitelistEnabled = settings.WhitelistEnabled,
+            AllowedApps = allowedApps,
+            HideTaskbar = settings.HideTaskbar,
+            BlockDesktopShortcuts = settings.BlockDesktopShortcuts,
             BlockedApps = settings.BlockedApps.Where(x => !string.IsNullOrWhiteSpace(x)).Select(AppRules.Normalize).Distinct().ToArray(),
             BlockedDomains = settings.BlockedDomains.Where(x => !string.IsNullOrWhiteSpace(x)).Select(DomainRules.Normalize).Distinct().ToArray()
         };

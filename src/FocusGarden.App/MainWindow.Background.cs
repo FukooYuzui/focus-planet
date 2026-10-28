@@ -79,6 +79,7 @@ public partial class MainWindow
         if (allowClose) return;
         if (clock != null || startingFocus || savingSettings) throw new InvalidOperationException("请先结束当前专注或等待开始操作完成。");
         shuttingDown = true; timer.Stop();
+        ReleaseWorkspace();
         StartButton.IsEnabled = false; BreakButton.IsEnabled = false; TestButton.IsEnabled = false;
         SetupPanel.IsEnabled = false;
         try

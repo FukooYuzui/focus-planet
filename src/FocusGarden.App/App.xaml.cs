@@ -14,6 +14,8 @@ public partial class App : Application
     public static bool TestMode { get; private set; }
     protected override async void OnStartup(StartupEventArgs e)
     {
+        // The shell recovery helper never opens user data or participates in the main app singleton.
+        if (await FocusShellWatchdog.TryRunAsync(e.Args) is int recoveryExit) { Shutdown(recoveryExit); return; }
         base.OnStartup(e);
         bool checkInstallation = e.Args.Contains("--check-installation");
         TestMode = e.Args.Contains("--test-mode");
@@ -63,5 +65,5 @@ public partial class App : Application
             MessageBox.Show("为保护已有专注记录，本次未能启动。请保留数据目录，检查可用空间或使用兼容版本后重试。\n" + ex.Message, "专注星球"); Shutdown(1);
         }
     }
-    protected override void OnExit(ExitEventArgs e) { dataInstance?.Dispose(); instance?.Dispose(); base.OnExit(e); }
+    protected override void OnExit(ExitEventArgs e) { if (MainWindow is MainWindow window) window.ReleaseWorkspace(); dataInstance?.Dispose(); instance?.Dispose(); base.OnExit(e); }
 }
