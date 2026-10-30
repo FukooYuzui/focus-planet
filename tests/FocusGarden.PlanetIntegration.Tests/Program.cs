@@ -104,6 +104,78 @@ internal static class Program
         }
         finally { CloseWindow(fresh); }
 
+        var uncappedPath = Path.Combine(root, "uncapped-growth"); Directory.CreateDirectory(uncappedPath);
+        var uncappedFocusPath = Path.Combine(uncappedPath, "focus.db");
+        using (var historical = new FocusStore(uncappedFocusPath))
+        {
+            var previousDay = new DateTimeOffset(DateTime.Today.AddDays(-1).AddHours(12));
+            var id = historical.BeginSession("合成历史专注：不得重写", 733, previousDay);
+            historical.AddProgress(id, 733, previousDay.AddSeconds(733));
+            historical.EndSession(id, "completed", previousDay.AddSeconds(733));
+        }
+        var historicalRows = FocusRows(uncappedFocusPath);
+        SetDataDirectory(uncappedPath); var uncapped = new MainWindow(); PrepareWindow(uncapped);
+        string? uncappedSourceRows = null;
+        try
+        {
+            Run("uncapped same-day focus and Token rewards agree with all displayed components", () =>
+            {
+                Assert(Field<PlanetSnapshot>(uncapped, "planetSnapshot").TotalGrowth == 0);
+                Assert(FocusRows(uncappedFocusPath) == historicalRows);
+                AddSameDayFocus(uncapped, 10800);
+                var now = DateTimeOffset.Now;
+                var day = now.ToLocalTime().ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+                Field<PlanetGrowthStore>(uncapped, "planetStore").GetTokenPeriodStart(Path.Combine(uncappedPath, "empty-codex"), now);
+                Field<Dictionary<string, long>>(uncapped, "eligiblePlanetTokens")[day] = 3100000;
+                var beforeGrowth = FocusRows(uncappedFocusPath);
+                Call(uncapped, "ForceRefreshPlanetAsync");
+                var snapshot = Field<PlanetSnapshot>(uncapped, "planetSnapshot");
+                Assert(snapshot.TodayFocusSeconds == 10800 && snapshot.TodayTokens == 3100000);
+                Assert(snapshot.TodayFocusPoints == 180 && snapshot.TodayTokenPoints == 75 && snapshot.TodaySynergyPoints == 60);
+                Assert(snapshot.TotalGrowth == 315 && snapshot.TodayGrowth == 315 && snapshot.TodayPlanetGrowth == 315);
+                Assert(snapshot.TodayFocusPoints + snapshot.TodayTokenPoints + snapshot.TodaySynergyPoints == snapshot.TodayGrowth);
+                Assert(Field<TextBlock>(uncapped, "PlanetFocusPointsText").Text == "+180");
+                Assert(Field<TextBlock>(uncapped, "PlanetTokenPointsText").Text == "+75");
+                Assert(Field<TextBlock>(uncapped, "PlanetSynergyPointsText").Text == "+60");
+                Assert(Field<TextBlock>(uncapped, "PlanetTodayGrowthText").Text == "今日共 315 点 · 本星球 +315");
+                Assert(FocusRows(uncappedFocusPath) == beforeGrowth);
+            });
+            Run("continued uncapped growth and repeated refreshes never rewrite or replay focus source rows", () =>
+            {
+                AddSameDayFocus(uncapped, 3600); uncappedSourceRows = FocusRows(uncappedFocusPath);
+                Call(uncapped, "ForceRefreshPlanetAsync");
+                var increased = Field<PlanetSnapshot>(uncapped, "planetSnapshot");
+                Assert(increased.TotalGrowth == 390 && increased.NewGrowth == 75);
+                Assert(increased.TodayFocusPoints == 240 && increased.TodayTokenPoints == 75 && increased.TodaySynergyPoints == 75);
+                for (var i = 0; i < 5; i++)
+                {
+                    Call(uncapped, "ForceRefreshPlanetAsync");
+                    var repeated = Field<PlanetSnapshot>(uncapped, "planetSnapshot");
+                    Assert(repeated.TotalGrowth == 390 && repeated.NewGrowth == 0 && repeated.TodayGrowth == 390);
+                    Assert(FocusRows(uncappedFocusPath) == uncappedSourceRows);
+                }
+                if (args.Length == 2 && args[0] == "--render")
+                    Render(uncapped, Path.Combine(args[1], "专注星球-无每日供养上限.png"), 960, 1900);
+            });
+        }
+        finally { CloseWindow(uncapped); }
+        Run("uncapped growth and exact saved focus records survive a main-window restart", () =>
+        {
+            SetDataDirectory(uncappedPath); var reopened = new MainWindow(); PrepareWindow(reopened);
+            try
+            {
+                var snapshot = Field<PlanetSnapshot>(reopened, "planetSnapshot");
+                Assert(snapshot.TotalGrowth == 390 && snapshot.NewGrowth == 0 && snapshot.TodayGrowth == 390);
+                Assert(snapshot.TodayFocusPoints + snapshot.TodayTokenPoints + snapshot.TodaySynergyPoints == snapshot.TodayGrowth);
+                Assert(Field<TextBlock>(reopened, "PlanetTodayGrowthText").Text == "今日共 390 点 · 本星球 +390");
+                Assert(uncappedSourceRows != null && FocusRows(uncappedFocusPath) == uncappedSourceRows);
+                Call(reopened, "ForceRefreshPlanetAsync");
+                Assert(Field<PlanetSnapshot>(reopened, "planetSnapshot").NewGrowth == 0);
+                Assert(FocusRows(uncappedFocusPath) == uncappedSourceRows);
+            }
+            finally { CloseWindow(reopened); }
+        });
+
         foreach (var failPresentation in new[] { false, true })
         Run(failPresentation
             ? "close never replays a committed rotation when presentation read fails"
@@ -329,6 +401,40 @@ internal static class Program
         store.AddProgress(id, seconds, end); store.EndSession(id, "completed", end);
         var revision = window.GetType().GetField("focusDataRevision", Flags)!;
         revision.SetValue(window, (long)revision.GetValue(window)! + 1);
+    }
+    private static void AddSameDayFocus(MainWindow window, int seconds)
+    {
+        Await((Task)Invoke(window, "WaitForBackgroundAsync")!);
+        var source = Field<FocusStore>(window, "store");
+        var day = DateTime.Today.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        var existing = source.GetAllDailyTotals().GetValueOrDefault(day);
+        Assert(existing + seconds < 86400);
+        // These synthetic completed intervals remain on one local date even if tests run just after midnight.
+        var start = new DateTimeOffset(DateTime.Today).AddSeconds(existing);
+        var id = source.BeginSession("合成同日专注", seconds, start);
+        source.AddProgress(id, seconds, start.AddSeconds(seconds)); source.EndSession(id, "completed", start.AddSeconds(seconds));
+        var revision = window.GetType().GetField("focusDataRevision", Flags)!;
+        revision.SetValue(window, (long)revision.GetValue(window)! + 1);
+    }
+    private static string FocusRows(string path)
+    {
+        using var database = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        database.Open();
+        var tables = new List<object?>();
+        foreach (var query in new[] { "SELECT * FROM sessions ORDER BY id", "SELECT * FROM session_days ORDER BY session_id,day", "SELECT * FROM settings ORDER BY id" })
+        {
+            using var command = database.CreateCommand(); command.CommandText = query;
+            using var reader = command.ExecuteReader();
+            var rows = new List<object?[]>();
+            while (reader.Read())
+            {
+                var values = new object?[reader.FieldCount];
+                for (int i = 0; i < values.Length; i++) values[i] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                rows.Add(values);
+            }
+            tables.Add(rows);
+        }
+        return JsonSerializer.Serialize(tables);
     }
     private static void Await(Task task)
     {

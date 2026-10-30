@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
 namespace FocusGarden.Core;
@@ -11,6 +13,7 @@ namespace FocusGarden.Core;
 /// </summary>
 public sealed class PlanetGrowthStore : IDisposable
 {
+    public const int SchemaVersion = 2;
     private readonly SqliteConnection _connection;
     private readonly object _gate = new();
     private bool _disposed;
@@ -21,6 +24,8 @@ public sealed class PlanetGrowthStore : IDisposable
         if (dbPath != ":memory:")
         {
             dbPath = Path.GetFullPath(dbPath);
+            if (string.Equals(Path.GetFileName(dbPath), "focus.db", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("星球成长不能打开专注记录数据库。", nameof(dbPath));
             Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
         }
         _connection = new SqliteConnection(new SqliteConnectionStringBuilder
@@ -29,14 +34,54 @@ public sealed class PlanetGrowthStore : IDisposable
             // database, retry on the next refresh instead of blocking focus for 30 seconds.
             DataSource = dbPath, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false, DefaultTimeout = 1
         }.ToString());
-        _connection.Open();
-        using var command = _connection.CreateCommand();
-        command.CommandText = """
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=FULL;
-            PRAGMA foreign_keys=ON;
-            PRAGMA busy_timeout=1000;
-            CREATE TABLE IF NOT EXISTS planet_state (
+        try
+        {
+            _connection.Open();
+            InitializeSchema(dbPath);
+            using var command = _connection.CreateCommand();
+            command.CommandText = "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=1000;";
+            command.ExecuteNonQuery();
+        }
+        catch { _connection.Dispose(); throw; }
+    }
+
+    private static string CreateDaysSql(string name) => $"""
+        CREATE TABLE {name} (
+            day TEXT PRIMARY KEY,
+            focus_seconds INTEGER NOT NULL DEFAULT 0 CHECK(focus_seconds>=0),
+            tokens INTEGER NOT NULL DEFAULT 0 CHECK(tokens>=0),
+            awarded INTEGER NOT NULL DEFAULT 0 CHECK(awarded>=0)
+        );
+        """;
+    private static string CreateCreditsSql(string name) => $"""
+        CREATE TABLE {name} (
+            planet_id INTEGER NOT NULL REFERENCES planets(id),
+            day TEXT NOT NULL,
+            growth INTEGER NOT NULL CHECK(growth>=0),
+            PRIMARY KEY(planet_id,day)
+        );
+        """;
+
+    private void InitializeSchema(string dbPath)
+    {
+        using var versionCommand = Command(null, "PRAGMA user_version");
+        var version = Convert.ToInt64(versionCommand.ExecuteScalar());
+        if (version is < 0 or > SchemaVersion)
+            throw new InvalidOperationException("星球成长数据库来自不兼容的较新版本；已有成长保持不变，请使用对应版本打开。");
+        using var tables = Command(null, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
+        var names = new List<string>();
+        using (var reader = tables.ExecuteReader()) while (reader.Read()) names.Add(reader.GetString(0));
+        if (names.Count == 0)
+        {
+            if (version != 0) throw new InvalidOperationException("星球数据库缺少原有记录表，未创建空星球或覆盖原文件。");
+            using var foreignKeys = Command(null, "PRAGMA foreign_keys=ON"); foreignKeys.ExecuteNonQuery();
+            using var create = _connection.BeginTransaction(deferred: false);
+            RequireUnchangedVersion(create, version);
+            using var stillEmpty = Command(create, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
+            if (Convert.ToInt64(stillEmpty.ExecuteScalar()) != 0)
+                throw new InvalidOperationException("星球数据库在初始化前发生变化，原有记录未修改。");
+            using var command = Command(create, """
+            CREATE TABLE planet_state (
                 id INTEGER PRIMARY KEY CHECK(id=1),
                 activated_at TEXT NOT NULL,
                 activation_day TEXT NOT NULL,
@@ -45,32 +90,175 @@ public sealed class PlanetGrowthStore : IDisposable
                 token_source TEXT,
                 token_period_start TEXT
             );
-            CREATE TABLE IF NOT EXISTS planets (
+            CREATE TABLE planets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 activated_at TEXT NOT NULL,
                 seed INTEGER NOT NULL,
                 parent_id INTEGER UNIQUE REFERENCES planets(id)
             );
-            CREATE TABLE IF NOT EXISTS planet_days (
-                day TEXT PRIMARY KEY,
-                focus_seconds INTEGER NOT NULL DEFAULT 0 CHECK(focus_seconds>=0),
-                tokens INTEGER NOT NULL DEFAULT 0 CHECK(tokens>=0),
-                awarded INTEGER NOT NULL DEFAULT 0 CHECK(awarded>=0 AND awarded<=200)
-            );
-            CREATE TABLE IF NOT EXISTS planet_token_observations (
+            CREATE TABLE planet_token_observations (
                 day TEXT PRIMARY KEY,
                 high_water INTEGER NOT NULL CHECK(high_water>=0)
             );
-            CREATE TABLE IF NOT EXISTS planet_growth_credits (
-                planet_id INTEGER NOT NULL REFERENCES planets(id),
-                day TEXT NOT NULL,
-                growth INTEGER NOT NULL CHECK(growth>=0 AND growth<=200),
-                PRIMARY KEY(planet_id,day)
-            );
-            PRAGMA user_version=1;
-            """;
-        command.ExecuteNonQuery();
+            """ + CreateDaysSql("planet_days") + CreateCreditsSql("planet_growth_credits") + $" PRAGMA user_version={SchemaVersion};");
+            command.ExecuteNonQuery(); create.Commit(); return;
+        }
+        if (!names.SequenceEqual(new[] { "planet_days", "planet_growth_credits", "planet_state", "planet_token_observations", "planets" }))
+            throw new InvalidOperationException("星球数据库结构不兼容，未改写或清空原有记录。");
+        ValidateColumns();
+        using (var foreignKeys = Command(null, "PRAGMA foreign_keys=ON")) foreignKeys.ExecuteNonQuery();
+        if (version == SchemaVersion) return;
+
+        // The verified online backup precedes all schema and reward changes, including committed WAL data.
+        var before = dbPath == ":memory:" ? Fingerprint(_connection) : BackupLegacyGrowth(dbPath);
+        using var migration = _connection.BeginTransaction(deferred: false);
+        RequireUnchangedVersion(migration, version);
+        if (before != Fingerprint(_connection, migration))
+            throw new IOException("备份后星球记录被其他窗口修改，本次未迁移，请关闭其他窗口后重试。");
+        using (var create = Command(migration, CreateDaysSql("planet_days_v2_migration") + CreateCreditsSql("planet_growth_credits_v2_migration"))) create.ExecuteNonQuery();
+        using (var copy = Command(migration, """
+            INSERT INTO planet_days_v2_migration(day,focus_seconds,tokens,awarded)
+                SELECT day,focus_seconds,tokens,awarded FROM planet_days;
+            INSERT INTO planet_growth_credits_v2_migration(planet_id,day,growth)
+                SELECT planet_id,day,growth FROM planet_growth_credits;
+            """)) copy.ExecuteNonQuery();
+        if (before != Fingerprint(_connection, migration, "planet_days_v2_migration", "planet_growth_credits_v2_migration"))
+            throw new IOException("星球记录迁移副本不一致，已取消本次迁移。");
+        using (var replace = Command(migration, """
+            DROP TABLE planet_growth_credits;
+            DROP TABLE planet_days;
+            ALTER TABLE planet_days_v2_migration RENAME TO planet_days;
+            ALTER TABLE planet_growth_credits_v2_migration RENAME TO planet_growth_credits;
+            """)) replace.ExecuteNonQuery();
+        CreditHistoricalDifference(migration);
+        using (var finish = Command(migration, $"PRAGMA user_version={SchemaVersion};")) finish.ExecuteNonQuery();
+        RequireHealthy(_connection, migration);
+        migration.Commit();
+    }
+
+    private void RequireUnchangedVersion(SqliteTransaction transaction, long expected)
+    {
+        using var current = Command(transaction, "PRAGMA user_version");
+        if (Convert.ToInt64(current.ExecuteScalar()) != expected)
+            throw new InvalidOperationException("星球数据库版本在准备期间发生变化，未降级或改写原有记录，请关闭其他窗口后重试。");
+    }
+
+    private void CreditHistoricalDifference(SqliteTransaction transaction)
+    {
+        var differences = new List<(string Day, int Target, int Delta)>();
+        using (var query = Command(transaction, "SELECT day,focus_seconds,tokens,awarded FROM planet_days ORDER BY day"))
+        using (var reader = query.ExecuteReader())
+            while (reader.Read())
+            {
+                var awarded = reader.GetInt32(3);
+                var target = PlanetGrowthRules.Calculate(reader.GetInt32(1), reader.GetInt64(2)).TotalGrowth;
+                if (target > awarded) differences.Add((reader.GetString(0), target, target - awarded));
+            }
+        if (differences.Count == 0) return;
+        using var active = Command(transaction, "SELECT p.id FROM planet_state s JOIN planets p ON p.id=s.current_planet_id WHERE s.id=1");
+        if (active.ExecuteScalar() is not long planetId)
+            throw new InvalidOperationException("星球存档缺少有效的当前星球，未迁移或补发成长，请保留原存档。");
+        foreach (var difference in differences)
+        {
+            using var credit = Command(transaction, """
+                INSERT INTO planet_growth_credits(planet_id,day,growth) VALUES($planet,$day,$delta)
+                ON CONFLICT(planet_id,day) DO UPDATE SET growth=growth+excluded.growth;
+                UPDATE planet_days SET awarded=$target WHERE day=$day;
+                """);
+            credit.Parameters.AddWithValue("$planet", planetId);
+            credit.Parameters.AddWithValue("$day", difference.Day);
+            credit.Parameters.AddWithValue("$delta", difference.Delta);
+            credit.Parameters.AddWithValue("$target", difference.Target);
+            credit.ExecuteNonQuery();
+        }
+    }
+
+    private void ValidateColumns()
+    {
+        foreach (var (table, columns) in new[] {
+            ("planet_state", new[] { "id", "activated_at", "activation_day", "focus_baseline", "current_planet_id", "token_source", "token_period_start" }),
+            ("planets", new[] { "id", "name", "activated_at", "seed", "parent_id" }),
+            ("planet_days", new[] { "day", "focus_seconds", "tokens", "awarded" }),
+            ("planet_token_observations", new[] { "day", "high_water" }),
+            ("planet_growth_credits", new[] { "planet_id", "day", "growth" }) })
+        {
+            using var query = Command(null, $"PRAGMA table_info({table})");
+            using var reader = query.ExecuteReader(); var actual = new List<string>();
+            while (reader.Read()) actual.Add(reader.GetString(1));
+            if (!actual.SequenceEqual(columns)) throw new InvalidOperationException("星球记录字段不兼容，未改写原存档。");
+        }
+    }
+
+    private string BackupLegacyGrowth(string dbPath)
+    {
+        var backups = Path.Combine(Path.GetDirectoryName(dbPath)!, "backups");
+        Directory.CreateDirectory(backups);
+        var final = Path.Combine(backups, $"planet-growth-before-v{SchemaVersion}-{DateTime.UtcNow:yyyyMMddTHHmmssfffZ}-{Guid.NewGuid():N}.db");
+        var temporary = final + ".partial";
+        string fingerprint;
+        using (var snapshot = _connection.BeginTransaction(deferred: true))
+        {
+            RequireHealthy(_connection, snapshot);
+            fingerprint = Fingerprint(_connection, snapshot);
+            using (File.Open(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None)) { }
+            using (var backup = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = temporary, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString()))
+            {
+                backup.Open(); _connection.BackupDatabase(backup);
+                RequireHealthy(backup);
+                if (fingerprint != Fingerprint(backup)) throw new IOException("星球成长备份内容校验失败，原存档未修改。");
+                using var finish = backup.CreateCommand(); finish.CommandText = "PRAGMA journal_mode=DELETE";
+                if (!string.Equals(finish.ExecuteScalar() as string, "delete", StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("无法生成独立星球成长备份，原存档未修改。");
+            }
+            snapshot.Commit();
+        }
+        using (var verify = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = temporary, Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString()))
+        {
+            verify.Open(); RequireHealthy(verify);
+            if (fingerprint != Fingerprint(verify)) throw new IOException("星球成长备份重新打开后校验失败，原存档未修改。");
+            using var journal = verify.CreateCommand(); journal.CommandText = "PRAGMA journal_mode";
+            if (!string.Equals(journal.ExecuteScalar() as string, "delete", StringComparison.OrdinalIgnoreCase))
+                throw new IOException("星球成长备份仍依赖日志文件，本次未迁移。");
+        }
+        File.Move(temporary, final); return fingerprint;
+    }
+
+    private static string Fingerprint(SqliteConnection connection, SqliteTransaction? transaction = null,
+        string daysTable = "planet_days", string creditsTable = "planet_growth_credits")
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var sql in new[] {
+            "PRAGMA user_version",
+            "SELECT id,activated_at,activation_day,focus_baseline,current_planet_id,token_source,token_period_start FROM planet_state ORDER BY id",
+            "SELECT id,name,activated_at,seed,parent_id FROM planets ORDER BY id",
+            "SELECT day,focus_seconds,tokens,awarded FROM planet_days ORDER BY day",
+            "SELECT day,high_water FROM planet_token_observations ORDER BY day",
+            "SELECT planet_id,day,growth FROM planet_growth_credits ORDER BY planet_id,day",
+            "SELECT name,seq FROM sqlite_sequence ORDER BY name" })
+        {
+            hash.AppendData(Encoding.UTF8.GetBytes(sql));
+            using var command = connection.CreateCommand(); command.Transaction = transaction;
+            command.CommandText = sql.Replace("FROM planet_days ", "FROM " + daysTable + " ").Replace("FROM planet_growth_credits ", "FROM " + creditsTable + " ");
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var row = new object?[reader.FieldCount];
+                for (int i = 0; i < row.Length; i++) row[i] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                hash.AppendData(JsonSerializer.SerializeToUtf8Bytes(row));
+            }
+        }
+        return Convert.ToHexString(hash.GetHashAndReset());
+    }
+
+    private static void RequireHealthy(SqliteConnection connection, SqliteTransaction? transaction = null)
+    {
+        using var command = connection.CreateCommand(); command.Transaction = transaction; command.CommandText = "PRAGMA quick_check";
+        if (!string.Equals(command.ExecuteScalar() as string, "ok", StringComparison.Ordinal))
+            throw new IOException("星球成长数据库完整性检查未通过，原文件已保留。");
+        command.CommandText = "PRAGMA foreign_key_check";
+        using var reader = command.ExecuteReader();
+        if (reader.Read()) throw new IOException("星球成长数据库存在失效的星球引用，原文件已保留，未继续迁移。");
     }
 
     public void Initialize(DateTimeOffset now, IReadOnlyDictionary<string, int> focusDailyTotals)
@@ -369,7 +557,7 @@ public sealed class PlanetGrowthStore : IDisposable
         return reader.Read() ? new Day(reader.GetInt32(0), reader.GetInt64(1), reader.GetInt32(2)) : new Day(0, 0, 0);
     }
 
-    private SqliteCommand Command(SqliteTransaction transaction, string sql)
+    private SqliteCommand Command(SqliteTransaction? transaction, string sql)
     {
         var command = _connection.CreateCommand();
         command.Transaction = transaction;

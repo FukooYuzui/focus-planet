@@ -43,6 +43,29 @@ DateTimeOffset Local(int year, int month, int day, int hour = 0, int minute = 0,
 string Day(DateTimeOffset date) => TimeZoneInfo.ConvertTime(date, TimeZoneInfo.Local).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 Dictionary<string, int> Focus(int seconds, DateTimeOffset? date = null) => new() { [Day(date ?? start)] = seconds };
 Dictionary<string, long> Tokens(long tokens, DateTimeOffset? date = null) => new() { [Day(date ?? start)] = tokens };
+string LegacyPath(string name)
+{
+    var directory = Path.Combine(basePath, name); Directory.CreateDirectory(directory);
+    return Path.Combine(directory, "planet.db");
+}
+long Scalar(string path, string sql)
+{
+    using var connection = LegacyV1Fixture.Open(path, SqliteOpenMode.ReadOnly);
+    using var command = connection.CreateCommand(); command.CommandText = sql;
+    return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+}
+string Rows(string path)
+{
+    using var connection = LegacyV1Fixture.Open(path, SqliteOpenMode.ReadOnly);
+    return LegacyV1Fixture.OriginalRows(connection);
+}
+void Execute(string path, string sql)
+{
+    using var connection = LegacyV1Fixture.Open(path);
+    using var command = connection.CreateCommand(); command.CommandText = sql; command.ExecuteNonQuery();
+}
+string[] GrowthBackups(string path) => Directory.GetFiles(Path.Combine(Path.GetDirectoryName(path)!, "backups"), "planet-growth-before-v2-*.db");
+string JsonRow(params object[] values) => System.Text.Json.JsonSerializer.Serialize(values);
 PlanetGrowthStore NewStore(DateTimeOffset? at = null)
 {
     var store = new PlanetGrowthStore(":memory:");
@@ -62,12 +85,15 @@ Run("point formula, flooring, diminishing returns and independent contributions"
     Equal(new PlanetDailyPoints(0, 60, 0), PlanetGrowthRules.Calculate(0, 1500000));
 });
 
-Run("daily caps and extreme or negative input stay bounded", () =>
+Run("daily rewards continue past former caps and numeric extremes remain safe", () =>
 {
-    Equal(200, PlanetGrowthRules.Calculate(int.MaxValue, long.MaxValue).TotalGrowth);
+    Equal(new PlanetDailyPoints(300, 75, 75), PlanetGrowthRules.Calculate(18000, 3100000));
+    Equal(new PlanetDailyPoints(301, 75, 75), PlanetGrowthRules.Calculate(18060, 3100000));
+    Equal(new PlanetDailyPoints(300, 90, 90), PlanetGrowthRules.Calculate(18000, 6300000));
+    Equal(35792784, PlanetGrowthRules.Calculate(int.MaxValue, long.MaxValue).TotalGrowth);
     Equal(0, PlanetGrowthRules.Calculate(int.MinValue, long.MinValue).TotalGrowth);
-    Equal(120, PlanetGrowthRules.Calculate(int.MaxValue, 0).TotalGrowth);
-    Equal(60, PlanetGrowthRules.Calculate(0, long.MaxValue).TotalGrowth);
+    Equal(35791394, PlanetGrowthRules.Calculate(int.MaxValue, 0).TotalGrowth);
+    Equal(695, PlanetGrowthRules.Calculate(0, long.MaxValue).TotalGrowth);
 });
 
 Run("activation excludes previous days and existing focus on activation day", () =>
@@ -180,15 +206,15 @@ Run("clock rollback never reopens an old Token period", () =>
     Equal(0L, store.Update(start.AddDays(1), emptyFocus, Tokens(100000, start.AddDays(1))).NewGrowth);
 });
 
-Run("midnight resets daily cap while permanent growth remains", () =>
+Run("midnight starts new daily contributions while permanent growth remains", () =>
 {
     var late = Local(2026, 5, 2, 23, 59);
     using var store = NewStore(late);
-    Equal(200L, store.Update(late, Focus(7200, late), Tokens(1500000, late)).TotalGrowth);
+    Equal(220L, store.Update(late, Focus(7200, late), Tokens(1500000, late)).TotalGrowth);
     var next = late.AddMinutes(2);
     var snapshot = store.Update(next, Focus(60, next), Tokens(100000, next));
     Equal(16, snapshot.TodayGrowth);
-    Equal(216L, snapshot.TotalGrowth);
+    Equal(236L, snapshot.TotalGrowth);
 });
 
 Run("cross-year history remains credited without replay", () =>
@@ -251,7 +277,7 @@ Run("maximum level retains growth and has no next threshold", () =>
         tokens[Day(start.AddDays(i))] = 1500000;
     }
     var result = store.Update(start.AddMonths(5), focus, tokens);
-    Equal(10000L, result.TotalGrowth);
+    Equal(11000L, result.TotalGrowth);
     Equal(5, result.Level);
     Equal("星际绿洲", result.LevelName);
     Equal<long?>(null, result.NextLevelAt);
@@ -364,7 +390,7 @@ Run("Token accumulation saturates safely across multiple sources", () =>
     store.GetTokenPeriodStart(sourceB, start.AddSeconds(1));
     var result = store.Update(start.AddSeconds(1), emptyFocus, Tokens(1000));
     Equal(long.MaxValue, result.TodayTokens);
-    Equal(60L, result.TotalGrowth);
+    Equal(695L, result.TotalGrowth);
 });
 
 Run("six natural months are required and low-growth planets may explore", () =>
@@ -418,7 +444,7 @@ Run("old planets persist and each planet can open only one successor", () =>
     Equal(3, store.ListPlanets().Count);
 });
 
-Run("switching planets only routes newly earned deltas and shares daily cap", () =>
+Run("switching planets only routes new deltas and cannot replay uncapped daily rewards", () =>
 {
     using var store = NewStore();
     var originalId = store.GetSnapshot(start).PlanetId;
@@ -434,13 +460,13 @@ Run("switching planets only routes newly earned deltas and shares daily cap", ()
     Equal(7L, increased.NewGrowth);
     Equal(7L, increased.TotalGrowth);
     store.SelectPlanet(originalId);
-    var capped = store.Update(due, Focus(7200, due), Tokens(1500000, due));
-    Equal(145L, capped.NewGrowth);
-    Equal(193L, capped.TotalGrowth);
-    Equal(200, capped.TodayGrowth);
+    var increasedAgain = store.Update(due, Focus(7200, due), Tokens(1500000, due));
+    Equal(165L, increasedAgain.NewGrowth);
+    Equal(213L, increasedAgain.TotalGrowth);
+    Equal(220, increasedAgain.TodayGrowth);
     store.SelectPlanet(next.PlanetId);
     Equal(0L, store.Update(due, Focus(7200, due), Tokens(1500000, due)).NewGrowth);
-    Equal(200L, store.ListPlanets().Sum(x => x.TotalGrowth));
+    Equal(220L, store.ListPlanets().Sum(x => x.TotalGrowth));
 });
 
 Run("multi-planet selection names and no-replay survive restart", () =>
@@ -482,6 +508,176 @@ Run("invalid selection and disposed or uninitialized operations are rejected", (
     store.Dispose();
     Throws<ObjectDisposedException>(() => store.GetSnapshot(start));
     Throws<ObjectDisposedException>(() => store.Initialize(start, emptyFocus));
+});
+
+Run("fresh schema accepts growth beyond 200 and exact large rewards survive restart", () =>
+{
+    var path = LegacyPath("uncapped-reopen");
+    using (var store = new PlanetGrowthStore(path))
+    {
+        store.Initialize(start, emptyFocus); store.GetTokenPeriodStart(sourceA, start);
+        var grown = store.Update(start, Focus(18000), Tokens(3100000));
+        Equal(450, grown.TodayGrowth); Equal(450, grown.TodayPlanetGrowth); Equal(450L, grown.TotalGrowth);
+        var maximum = store.Update(start, Focus(int.MaxValue), Tokens(long.MaxValue));
+        Equal(35792784, maximum.TodayGrowth); Equal(35792784L, maximum.TotalGrowth);
+        Equal(maximum.TodayGrowth, maximum.TodayFocusPoints + maximum.TodayTokenPoints + maximum.TodaySynergyPoints);
+    }
+    Equal(2L, Scalar(path, "PRAGMA user_version"));
+    using var reopened = new PlanetGrowthStore(path);
+    var repeated = reopened.Update(start, Focus(int.MaxValue), Tokens(long.MaxValue));
+    Equal(35792784L, repeated.TotalGrowth); Equal(0L, repeated.NewGrowth);
+});
+
+Run("v1 migration preserves original rows except exact backpay to the selected planet", () =>
+{
+    var path = LegacyPath("legacy-backpay"); LegacyV1Fixture.Create(path, start, sourceA);
+    var original = Rows(path); var day = Day(start);
+    using (var migrated = new PlanetGrowthStore(path))
+    {
+        var expected = original.Replace(JsonRow(day, 18000L, 3100000L, 200L), JsonRow(day, 18000L, 3100000L, 450L))
+            .Replace(JsonRow(2L, day, 20L), JsonRow(2L, day, 270L));
+        True(expected != original); Equal(expected, Rows(path));
+        var snapshot = migrated.GetSnapshot(start);
+        Equal(2L, snapshot.PlanetId); Equal("当前家园", snapshot.Name); Equal(445566, snapshot.Seed);
+        Equal(270L, snapshot.TotalGrowth); Equal(450, snapshot.TodayGrowth); Equal(270, snapshot.TodayPlanetGrowth);
+        Equal(300, snapshot.TodayFocusPoints); Equal(75, snapshot.TodayTokenPoints); Equal(75, snapshot.TodaySynergyPoints);
+        Equal(0L, snapshot.NewGrowth);
+        Equal(228L, migrated.ListPlanets().Single(p => p.PlanetId == 1).TotalGrowth);
+        Equal(start.AddMonths(-6), migrated.GetTokenPeriodStart(sourceA, start));
+        Equal(2L, Scalar(path, "PRAGMA user_version"));
+        Equal(1, GrowthBackups(path).Length); Equal(original, Rows(GrowthBackups(path)[0]));
+        Equal(1L, Scalar(GrowthBackups(path)[0], "PRAGMA user_version"));
+    }
+    var after = Rows(path);
+    for (int i = 0; i < 3; i++)
+    {
+        using var reopened = new PlanetGrowthStore(path);
+        Equal(0L, reopened.Update(start, Focus(18000), Tokens(3100000)).NewGrowth);
+        Equal(after, Rows(path)); Equal(1, GrowthBackups(path).Length);
+    }
+});
+
+Run("migrated observations retain high water and route only new uncapped deltas after switching", () =>
+{
+    var path = LegacyPath("legacy-dedup"); LegacyV1Fixture.Create(path, start, sourceA);
+    using var store = new PlanetGrowthStore(path);
+    Equal(0L, store.Update(start, Focus(12000), Tokens(1500000)).NewGrowth);
+    Equal(450, store.GetSnapshot(start).TodayGrowth);
+    Equal(0L, store.Update(start, Focus(18000), Tokens(3100000)).NewGrowth);
+    var next = store.Update(start, Focus(18060), Tokens(3100000));
+    Equal(1L, next.NewGrowth); Equal(271L, next.TotalGrowth); Equal(451, next.TodayGrowth);
+    store.SelectPlanet(1);
+    Equal(0L, store.Update(start, Focus(18060), Tokens(3100000)).NewGrowth);
+    Equal(1L, store.Update(start, Focus(18120), Tokens(3100000)).NewGrowth);
+    Equal(229L, store.GetSnapshot(start).TotalGrowth);
+    Equal(500L, store.ListPlanets().Sum(p => p.TotalGrowth));
+});
+
+Run("committed WAL observations are present in the self-contained pre-migration backup", () =>
+{
+    var path = LegacyPath("legacy-wal"); LegacyV1Fixture.Create(path, start, sourceA);
+    using var writer = LegacyV1Fixture.Open(path);
+    using (var command = writer.CreateCommand())
+    {
+        command.CommandText = "PRAGMA wal_autocheckpoint=0; BEGIN; UPDATE planet_days SET tokens=6300000 WHERE tokens=3100000; UPDATE planet_token_observations SET high_water=6300000 WHERE high_water=3100000; COMMIT;";
+        command.ExecuteNonQuery();
+    }
+    True(File.Exists(path + "-wal") && new FileInfo(path + "-wal").Length > 32);
+    var original = LegacyV1Fixture.OriginalRows(writer);
+    using var migrated = new PlanetGrowthStore(path);
+    var backup = GrowthBackups(path).Single(); Equal(original, Rows(backup));
+    using var saved = LegacyV1Fixture.Open(backup, SqliteOpenMode.ReadOnly);
+    using var mode = saved.CreateCommand(); mode.CommandText = "PRAGMA journal_mode";
+    Equal("delete", mode.ExecuteScalar() as string);
+    Equal(300L, migrated.GetSnapshot(start).TotalGrowth); Equal(480, migrated.GetSnapshot(start).TodayGrowth);
+});
+
+Run("backup creation failure leaves old schema and all growth rows unchanged", () =>
+{
+    var path = LegacyPath("backup-failure"); LegacyV1Fixture.Create(path, start, sourceA);
+    var before = Rows(path);
+    File.WriteAllText(Path.Combine(Path.GetDirectoryName(path)!, "backups"), "Synthetic path blocker");
+    Throws<IOException>(() => { using var ignored = new PlanetGrowthStore(path); });
+    Equal(before, Rows(path)); Equal(1L, Scalar(path, "PRAGMA user_version"));
+});
+
+Run("invalid selected planet rolls back table replacement and all historical backpay", () =>
+{
+    var path = LegacyPath("invalid-current"); LegacyV1Fixture.Create(path, start, sourceA);
+    Execute(path, "UPDATE planet_state SET current_planet_id=999;"); var before = Rows(path);
+    Throws<InvalidOperationException>(() => { using var ignored = new PlanetGrowthStore(path); });
+    Equal(before, Rows(path)); Equal(1L, Scalar(path, "PRAGMA user_version"));
+    Equal(0L, Scalar(path, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%v2_migration%'"));
+    Equal(before, Rows(GrowthBackups(path).Single()));
+    Throws<SqliteException>(() => Execute(path, "UPDATE planet_days SET awarded=201 WHERE awarded=200;"));
+});
+
+Run("orphan historical credits are rejected without altering records or schema", () =>
+{
+    var path = LegacyPath("migration-copy-failure"); LegacyV1Fixture.Create(path, start, sourceA);
+    Execute(path, "PRAGMA foreign_keys=OFF; INSERT INTO planet_growth_credits VALUES(999,'2026-01-30',1);");
+    var before = Rows(path);
+    Throws<IOException>(() => { using var ignored = new PlanetGrowthStore(path); });
+    Equal(before, Rows(path)); Equal(1L, Scalar(path, "PRAGMA user_version"));
+    Equal(0L, Scalar(path, "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE '%v2_migration%'"));
+    Equal(0, GrowthBackups(path).Length);
+});
+
+Run("orphan parent planets are rejected before creating a migration backup", () =>
+{
+    var path = LegacyPath("orphan-parent"); LegacyV1Fixture.Create(path, start, sourceA);
+    Execute(path, "PRAGMA foreign_keys=OFF; UPDATE planets SET parent_id=999 WHERE id=2;");
+    var before = Rows(path);
+    Throws<IOException>(() => { using var ignored = new PlanetGrowthStore(path); });
+    Equal(before, Rows(path)); Equal(1L, Scalar(path, "PRAGMA user_version"));
+    Equal(0, GrowthBackups(path).Length);
+});
+
+Run("schema version is part of the migration snapshot fingerprint", () =>
+{
+    var path = LegacyPath("version-fingerprint"); LegacyV1Fixture.Create(path, start, sourceA);
+    using var connection = LegacyV1Fixture.Open(path);
+    var fingerprint = typeof(PlanetGrowthStore).GetMethod("Fingerprint", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+    string Read() => (string)fingerprint.Invoke(null, new object?[] { connection, null, "planet_days", "planet_growth_credits" })!;
+    var before = Read(); var rows = LegacyV1Fixture.OriginalRows(connection);
+    using var change = connection.CreateCommand(); change.CommandText = "PRAGMA user_version=99;"; change.ExecuteNonQuery();
+    Equal(rows, LegacyV1Fixture.OriginalRows(connection)); True(before != Read());
+    Throws<InvalidOperationException>(() => { using var ignored = new PlanetGrowthStore(path); });
+    Equal(99L, Scalar(path, "PRAGMA user_version"));
+});
+
+Run("future schema is rejected without changing database bytes version or rows", () =>
+{
+    var path = LegacyPath("future-schema"); LegacyV1Fixture.Create(path, start, sourceA);
+    Execute(path, "PRAGMA user_version=3;");
+    var bytes = File.ReadAllBytes(path); var before = Rows(path);
+    Throws<InvalidOperationException>(() => { using var ignored = new PlanetGrowthStore(path); });
+    True(bytes.SequenceEqual(File.ReadAllBytes(path))); Equal(before, Rows(path)); Equal(3L, Scalar(path, "PRAGMA user_version"));
+    True(!Directory.Exists(Path.Combine(Path.GetDirectoryName(path)!, "backups")));
+});
+
+Run("valid unversioned legacy tables migrate but unknown databases and focus paths are rejected", () =>
+{
+    var path = LegacyPath("unversioned-legacy"); LegacyV1Fixture.Create(path, start, sourceA);
+    Execute(path, "PRAGMA user_version=0;");
+    using (var migrated = new PlanetGrowthStore(path)) Equal(270L, migrated.GetSnapshot(start).TotalGrowth);
+    Equal(2L, Scalar(path, "PRAGMA user_version"));
+    var other = LegacyPath("other-database"); Execute(other, "CREATE TABLE original(value TEXT); INSERT INTO original VALUES('preserve');");
+    Throws<InvalidOperationException>(() => { using var ignored = new PlanetGrowthStore(other); });
+    Equal(0L, Scalar(other, "PRAGMA user_version")); Equal(1L, Scalar(other, "SELECT COUNT(*) FROM original"));
+    var focus = Path.Combine(basePath, "never-created", "focus.db");
+    Throws<ArgumentException>(() => { using var ignored = new PlanetGrowthStore(focus); }); True(!File.Exists(focus));
+});
+
+Run("empty legacy schema upgrades without inventing a selected planet or historical rewards", () =>
+{
+    var path = LegacyPath("empty-legacy"); Execute(path, LegacyV1Fixture.Schema);
+    using var store = new PlanetGrowthStore(path);
+    Equal(2L, Scalar(path, "PRAGMA user_version")); Equal(0L, Scalar(path, "SELECT COUNT(*) FROM planets"));
+    Throws<InvalidOperationException>(() => store.GetSnapshot(start));
+    store.Initialize(start, emptyFocus);
+    Equal(0L, store.GetSnapshot(start).TotalGrowth); Equal(1, store.ListPlanets().Count);
+    Equal(1, GrowthBackups(path).Length);
 });
 
 Console.WriteLine($"RESULT {passed} passed, {failed} failed");

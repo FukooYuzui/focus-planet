@@ -8,7 +8,7 @@ public readonly record struct PlanetDailyPoints(int FocusPoints, int TokenPoints
 }
 
 /// <summary>
-/// TodayFocus/Token/Synergy/Growth describe the shared daily budget. TodayPlanetGrowth is the share
+/// TodayFocus/Token/Synergy/Growth describe the shared daily rewards. TodayPlanetGrowth is the share
 /// awarded to this planet; TotalGrowth never includes another planet's credits.
 /// </summary>
 public sealed record PlanetSnapshot(
@@ -39,7 +39,7 @@ public sealed record PlanetSnapshot(
 public sealed record PlanetSummary(long PlanetId, string Name, DateTimeOffset ActivatedAt,
     long TotalGrowth, bool IsActive);
 
-/// <summary>Permanent, non-punitive growth with diminishing Token rewards and a 200 point daily cap.</summary>
+/// <summary>Permanent, non-punitive growth with diminishing Token rewards and no daily reward cap.</summary>
 public static class PlanetGrowthRules
 {
     public static ReadOnlyCollection<long> LevelThresholds { get; } =
@@ -54,9 +54,9 @@ public static class PlanetGrowthRules
 
     public static PlanetDailyPoints Calculate(int focusSeconds, long tokens)
     {
-        var focus = Math.Min(120, Math.Max(0, focusSeconds) / 60);
-        var token = Math.Min(60, (int)Math.Floor(15 * Math.Log2(1 + Math.Max(0, tokens) / 100000.0)));
-        var synergy = Math.Min(20, (int)Math.Floor(Math.Min(focus / 3.0, token)));
+        var focus = Math.Max(0, focusSeconds) / 60;
+        var token = (int)Math.Floor(15 * Math.Log2(1 + Math.Max(0, tokens) / 100000.0));
+        var synergy = Math.Min(focus / 3, token);
         return new PlanetDailyPoints(focus, token, synergy);
     }
 
