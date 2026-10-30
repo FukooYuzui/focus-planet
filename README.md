@@ -2,6 +2,12 @@
 
 一个从荒凉小星球开始、用专注与 Codex Token 助力养成的 Windows 桌面番茄钟。3D 卡通球面、宇宙星空、六个自然月养成周期，记录与家园布局只保存在本机。
 
+## 下载使用
+
+**[下载专注星球 0.8.1 · Windows 64 位 EXE](https://github.com/FukooYuzui/focus-planet/releases/download/v0.8.1/FocusPlanet-v0.8.1-win-x64.exe)**
+
+下载后双击运行，无需另装 .NET。更新前请正常关闭旧版；新版沿用原有本机存档，并在首次升级时自动备份。发布说明、文件校验值和第三方许可见 [GitHub Release](https://github.com/FukooYuzui/focus-planet/releases/tag/v0.8.1)。
+
 ## 0.8.1 取消每日成长上限
 
 专注、Token 与共同助力都不再受每日上限限制。每满一分钟专注仍获得 1 点，Token 仍按对数递减换算，共同助力仍按两项贡献计算；当天累计超过原来的 120 / 60 / 20 点后可以继续增长，也不再有合计 200 点的上限。星龄要求和六个自然月的探索周期保留。
