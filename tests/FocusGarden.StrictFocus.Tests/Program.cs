@@ -304,6 +304,9 @@ internal static partial class Program
                 finally { command.CommandText = "ROLLBACK"; command.ExecuteNonQuery(); }
 
                 var focusRows = f.AllRows();
+                // Tick may still have a refresh that captured the pre-minute focus total.
+                // Drain that coalesced refresh before requesting a post-unlock observation.
+                Call(f.Window, "DrainPlanetAsync");
                 Assert((bool)Call(f.Window, "RefreshPlanet")!);
                 Equal(1L, Field<PlanetSnapshot>(f.Window, "planetSnapshot").TotalGrowth);
                 for (var i = 0; i < 3; i++) Assert((bool)Call(f.Window, "RefreshPlanet")!);

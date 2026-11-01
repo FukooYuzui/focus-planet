@@ -1,12 +1,23 @@
-# 专注星球 · Focus Planet 0.11.0
+# 专注星球 · Focus Planet 0.11.1
 
 一个从荒凉小星球开始、用专注与 Codex Token 助力养成的 Windows 桌面番茄钟。3D 卡通球面、宇宙星空、六个自然月养成周期，记录与家园布局只保存在本机。
 
 ## 下载使用
 
-**[下载专注星球 0.11.0 · Windows 64 位 EXE](https://github.com/FukooYuzui/focus-planet/releases/download/v0.11.0/FocusPlanet-v0.11.0-win-x64.exe)**
+**[下载专注星球 0.11.1 · Windows 64 位 EXE](https://github.com/FukooYuzui/focus-planet/releases/download/v0.11.1/FocusPlanet-v0.11.1-win-x64.exe)**
 
-下载后双击运行，无需另装 .NET。更新前请正常关闭旧版；新版沿用原有本机存档，并在首次升级时自动备份。发布说明、文件校验值和第三方许可见 [GitHub Release](https://github.com/FukooYuzui/focus-planet/releases/tag/v0.11.0)。
+下载后双击运行，无需另装 .NET。更新前请正常关闭旧版；新版沿用原有本机存档，并在首次升级时自动备份。发布说明、文件校验值和第三方许可见 [GitHub Release](https://github.com/FukooYuzui/focus-planet/releases/tag/v0.11.1)。
+
+## 0.11.1 修复 Codex 日记漏读新格式
+
+修复本机明明有 Codex 对话，日记却报告消息数为 0 的问题。
+读取器同时支持旧 event_msg 和当前 response_item.message 的用户与助手可见文本。
+仅提取 input_text/output_text/text，排除系统/开发者指令、推理、工具输出、代理间消息和加密块。
+新旧格式同时记录同一条文本时做一对一镜像去重，随后重复发送的消息仍保留。
+增加来源诊断，区分目录不存在、扫描范围内没有当天消息和读取受限等情况。
+
+已生成的日记不会自动覆盖。更新后选择对应日期，点击“用 Codex 生成日记”，
+然后“查看新草稿”；确认后保存，旧正文继续保留备份。专注时长与星球存档不变。
 
 ## 0.11.0 Codex 工作日记
 
@@ -141,7 +152,7 @@
 3. 新星球从零开始。旧专注记录和旧 Token 日历保留，不会在首次启动时直接变成成长。
 4. 在“布置我的家园”的分类条目中选择已解锁内容，查看提示，点击“选择内容并放置”，再点击空地块；选中已有内容后可以移动、旋转 90° 或收起。每次操作自动保存。
 
-如旧版还在运行，请先正常关闭。窗口标题和左下角应显示 0.11.0。本版继续使用 `%LOCALAPPDATA%\FocusGarden`，兼容以前的专注记录、背景和设置。移动或替换 EXE 不会搬走或清空数据；首次运行库提取所用的临时缓存与专注记录目录分开。工程内部仍保留兼容用的 FocusGarden 名称。
+如旧版还在运行，请先正常关闭。窗口标题和左下角应显示 0.11.1。本版继续使用 `%LOCALAPPDATA%\FocusGarden`，兼容以前的专注记录、背景和设置。移动或替换 EXE 不会搬走或清空数据；首次运行库提取所用的临时缓存与专注记录目录分开。工程内部仍保留兼容用的 FocusGarden 名称。
 
 ## 星球如何成长
 

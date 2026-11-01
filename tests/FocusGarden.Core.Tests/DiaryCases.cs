@@ -68,6 +68,86 @@ internal static class DiaryCases
             try { DiarySource.ReadCodex(folder, day, cancel.Token); } catch (OperationCanceledException) { caught = true; }
             Check(caught && Directory.GetFiles(folder, "*", SearchOption.AllDirectories).Length == 1);
         });
+        run("current Codex response_item text messages work without any legacy event messages", () =>
+        {
+            var folder = Folder(); Directory.CreateDirectory(Path.Combine(folder, "sessions"));
+            var time = new DateTimeOffset(day.ToDateTime(new TimeOnly(12, 0)), TimeZoneInfo.Local.GetUtcOffset(day.ToDateTime(new TimeOnly(12, 0))));
+            var lines = new[] {
+                JsonSerializer.Serialize(new { timestamp = time, type = "response_item", payload = new { type = "message", id = "user-id", role = "user", content = new[] { new { type = "input_text", text = "请整理第一章" }, new { type = "input_text", text = "补充要求" } } } }),
+                JsonSerializer.Serialize(new { timestamp = time.AddSeconds(20), type = "response_item", payload = new { type = "message", id = "assistant-id", role = "assistant", status = "completed", phase = "final_answer", content = new[] { new { type = "output_text", text = "已给出章节摘要" } } } }) };
+            File.WriteAllLines(Path.Combine(folder, "sessions", "current.jsonl"), lines);
+            var result = DiarySource.ReadCodex(folder, day);
+            Check(result.Messages == 2 && result.Text.Contains("请整理第一章\n补充要求") && result.Text.Contains("已给出章节摘要") && result.Diagnostics.Contains("提取 2 条"));
+        });
+        run("modern diary extraction excludes reasoning tool targets developer instructions and agent coordination", () =>
+        {
+            var folder = Folder(); Directory.CreateDirectory(Path.Combine(folder, "sessions"));
+            var time = new DateTimeOffset(day.ToDateTime(new TimeOnly(12, 0)), TimeZoneInfo.Local.GetUtcOffset(day.ToDateTime(new TimeOnly(12, 0))));
+            string Row(object payload) => JsonSerializer.Serialize(new { timestamp = time, type = "response_item", payload });
+            var lines = new[] {
+                Row(new { type = "message", role = "developer", content = new[] { new { type = "input_text", text = "私有开发指令" } } }),
+                Row(new { type = "message", role = "assistant", channel = "analysis", content = new[] { new { type = "output_text", text = "私有推理" } } }),
+                Row(new { type = "message", role = "assistant", recipient = "tools.exec", content = new[] { new { type = "output_text", text = "工具调用" } } }),
+                Row(new { type = "agent_message", author = "worker", recipient = "/root", content = new[] { new { type = "input_text", text = "内部代理消息" } } }),
+                Row(new { type = "function_call_output", output = "工具返回内容" }),
+                Row(new { type = "message", role = "assistant", phase = "commentary", content = new[] { new { type = "output_text", text = "可见进展" }, new { type = "encrypted_content", text = "隐藏密文" } } }),
+                "null", "[]", Row(new { type = "message", role = "user", content = "unsupported" }) };
+            File.WriteAllLines(Path.Combine(folder, "sessions", "privacy.jsonl"), lines);
+            var result = DiarySource.ReadCodex(folder, day);
+            Check(result.Messages == 1 && result.Text.Contains("可见进展") && !result.Text.Contains("私有") && !result.Text.Contains("工具") && !result.Text.Contains("内部") && !result.Text.Contains("隐藏"));
+        });
+        run("legacy and modern mirror records count once while later repeated user messages remain", () =>
+        {
+            var folder = Folder(); Directory.CreateDirectory(Path.Combine(folder, "sessions"));
+            var time = new DateTimeOffset(day.ToDateTime(new TimeOnly(12, 0)), TimeZoneInfo.Local.GetUtcOffset(day.ToDateTime(new TimeOnly(12, 0))));
+            string Old(DateTimeOffset at) => JsonSerializer.Serialize(new { timestamp = at, type = "event_msg", payload = new { type = "user_message", message = "继续" } });
+            string Current(DateTimeOffset at) => JsonSerializer.Serialize(new { timestamp = at, type = "response_item", payload = new { type = "message", role = "user", content = new[] { new { type = "input_text", text = "继续" } } } });
+            File.WriteAllLines(Path.Combine(folder, "sessions", "mixed.jsonl"), new[] { Old(time), Current(time.AddMilliseconds(300)), Old(time.AddSeconds(10)), Current(time.AddSeconds(10.5)), Old(time.AddSeconds(11)) });
+            Check(DiarySource.ReadCodex(folder, day).Messages == 3);
+        });
+        run("modern messages obey local midnight and still redact credential text", () =>
+        {
+            var folder = Folder(); Directory.CreateDirectory(Path.Combine(folder, "archived_sessions"));
+            var midnight = day.ToDateTime(TimeOnly.MinValue); var time = new DateTimeOffset(midnight, TimeZoneInfo.Local.GetUtcOffset(midnight));
+            string Row(DateTimeOffset at, string text) => JsonSerializer.Serialize(new { timestamp = at.ToUniversalTime(), type = "response_item", payload = new { type = "message", role = "user", content = new[] { new { type = "input_text", text } } } });
+            File.WriteAllLines(Path.Combine(folder, "archived_sessions", "midnight.jsonl"), new[] { Row(time.AddSeconds(-1), "前一天"), Row(time, "当天工作\npassword=synthetic-secret"), Row(time.AddDays(1), "后一天") });
+            var result = DiarySource.ReadCodex(folder, day);
+            Check(result.Messages == 1 && result.Text.Contains("当天工作") && !result.Text.Contains("前一天") && !result.Text.Contains("后一天") && !result.Text.Contains("synthetic-secret"));
+        });
+        run("each cross-format mirror consumes only one counterpart in either emission order", () =>
+        {
+            foreach (var legacyFirst in new[] { true, false })
+            foreach (var mirrorDelay in new[] { 0, 0.3 })
+            {
+                var folder = Folder(); Directory.CreateDirectory(Path.Combine(folder, "sessions"));
+                var time = new DateTimeOffset(day.ToDateTime(new TimeOnly(12, 0)), TimeZoneInfo.Local.GetUtcOffset(day.ToDateTime(new TimeOnly(12, 0))));
+                string Row(bool old, double seconds) => old
+                    ? JsonSerializer.Serialize(new { timestamp = time.AddSeconds(seconds), type = "event_msg", payload = new { type = "user_message", message = "继续" } })
+                    : JsonSerializer.Serialize(new { timestamp = time.AddSeconds(seconds), type = "response_item", payload = new { type = "message", role = "user", content = new[] { new { type = "input_text", text = "继续" } } } });
+                File.WriteAllLines(Path.Combine(folder, "sessions", "mirrors.jsonl"), new[] { Row(legacyFirst, 0), Row(!legacyFirst, mirrorDelay), Row(!legacyFirst, 1) });
+                Check(DiarySource.ReadCodex(folder, day).Messages == 2);
+            }
+        });
+        run("missing source and empty day have distinct diagnostics instead of implying no Codex activity", () =>
+        {
+            var folder = Folder(); var missing = DiarySource.ReadCodex(folder, day); Check(missing.Messages == 0 && missing.Diagnostics.Contains("没有找到"));
+            Directory.CreateDirectory(Path.Combine(folder, "sessions")); var empty = DiarySource.ReadCodex(folder, day);
+            Check(empty.Messages == 0 && empty.Diagnostics.Contains("扫描 0 个文件") && !empty.Diagnostics.Contains("没有找到"));
+        });
+        run("batched same-text mirror pairs retain all unpaired candidates in both format orders", () =>
+        {
+            foreach (var legacyFirst in new[] { true, false })
+            {
+                var folder = Folder(); Directory.CreateDirectory(Path.Combine(folder, "sessions"));
+                var time = new DateTimeOffset(day.ToDateTime(new TimeOnly(12, 0)), TimeZoneInfo.Local.GetUtcOffset(day.ToDateTime(new TimeOnly(12, 0))));
+                string Row(bool old, double seconds) => old
+                    ? JsonSerializer.Serialize(new { timestamp = time.AddSeconds(seconds), type = "event_msg", payload = new { type = "user_message", message = "继续" } })
+                    : JsonSerializer.Serialize(new { timestamp = time.AddSeconds(seconds), type = "response_item", payload = new { type = "message", role = "user", content = new[] { new { type = "input_text", text = "继续" } } } });
+                var first = Row(legacyFirst, 0);
+                File.WriteAllLines(Path.Combine(folder, "sessions", "batched.jsonl"), new[] { first, first, Row(legacyFirst, .1), Row(!legacyFirst, .2), Row(!legacyFirst, .3) });
+                Check(DiarySource.ReadCodex(folder, day).Messages == 2);
+            }
+        });
         run("diary prompt marks current goals and bounded evidence without treating plans as completed work", () =>
         {
             var facts = new DiaryDayFacts(day, [new("完成实验", 60, "completed")], [], "研究报告 30%");
