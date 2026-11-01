@@ -410,6 +410,7 @@ Run("bounded background queue rejects excess work without dropping accepted writ
     finally { release.Set(); queue.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
 });
 
+DailyPlanCases.Run(basePath, Run);
 Console.WriteLine($"RESULT {passed} passed, {failed} failed");
 try { Directory.Delete(basePath, true); } catch { }
 return failed == 0 ? 0 : 1;

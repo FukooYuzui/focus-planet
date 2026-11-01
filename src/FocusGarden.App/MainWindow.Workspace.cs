@@ -115,14 +115,14 @@ public partial class MainWindow
 
     private void ShowWorkspaceDock()
     {
-        if (workspaceSession == null || clock == null) return;
+        if (workspaceSession == null || clock == null && !DailyActive) return;
         var current = workspaceSession;
         workspaceWindowsShown = IsVisible;
         Action emergency = () => { if (ReferenceEquals(workspaceSession, current)) ConfirmEmergency(); };
         // No HWND creation or monitor manipulation in hidden synthetic fixtures.
         workspaceBackdrops = workspaceWindowsShown
-            ? WorkspaceBackdropWindow.CreateForDisplays(currentTask, appearance.BackgroundImage, emergency, IsStrictFocusActive)
-            : [new WorkspaceBackdropWindow(currentTask, appearance.BackgroundImage, emergency, IsStrictFocusActive)];
+            ? WorkspaceBackdropWindow.CreateForDisplays(currentTask, appearance.BackgroundImage, emergency, IsStrictFocusActive || DailyActive)
+            : [new WorkspaceBackdropWindow(currentTask, appearance.BackgroundImage, emergency, IsStrictFocusActive || DailyActive)];
         foreach (var backdrop in workspaceBackdrops)
         {
             backdrop.DisplayConfigurationChanged += (_, _) =>
@@ -130,7 +130,10 @@ public partial class MainWindow
                 if (ReferenceEquals(workspaceSession, current))
                     Finish("interrupted", "显示器配置发生变化，本轮已中断并恢复桌面；已保存的时长保留。");
             };
-            backdrop.UpdateTime(FormatTime(clock.RemainingSeconds));
+            if (DailyActive)
+                backdrop.ConfigureDaily((task, minutes) => ReferenceEquals(workspaceSession, current) ? StartDailyTaskAsync(task, minutes) : Task.FromResult<string?>("这轮已结束。"),
+                    () => { if (ReferenceEquals(workspaceSession, current)) StopDailyTask("emergency", "任务钟已停止，全天专注继续。"); });
+            backdrop.UpdateTime(WorkspaceCountdown);
             if (workspaceWindowsShown) backdrop.Show();
         }
         current.SetBackdropWindows(workspaceWindowsShown
@@ -139,13 +142,15 @@ public partial class MainWindow
         workspaceDock = new WorkspaceDockWindow(
             handle => { if (ReferenceEquals(workspaceSession, current)) ActivateWorkspaceApp(handle); },
             () => { if (ReferenceEquals(workspaceSession, current)) ShowWorkspaceFocus(); },
-            () => { if (ReferenceEquals(workspaceSession, current)) ConfirmEmergency(); }, IsStrictFocusActive);
+            () => { if (ReferenceEquals(workspaceSession, current)) ConfirmEmergency(); }, IsStrictFocusActive || DailyActive,
+            path => { if (ReferenceEquals(workspaceSession, current)) LaunchDailyApp(path); }, DailyActive);
         RefreshWorkspaceDock();
         // Hidden synthetic fixtures never show a window or register a desktop hotkey.
         // Keep the switcher available even when the user minimizes the main window.
         if (workspaceWindowsShown) workspaceDock.Show();
         var first = current.GetAllowedWindows().FirstOrDefault();
         if (workspaceWindowsShown && first != null) current.ActivateAllowedWindow(first.Handle);
+        else if (workspaceWindowsShown) ShowWorkspaceFocus();
     }
 
     private void ShowWorkspaceFocus()
@@ -186,7 +191,7 @@ public partial class MainWindow
                 if (dock.WindowState == WindowState.Minimized) dock.WindowState = WindowState.Normal;
                 if (!dock.IsVisible) dock.Show();
             }
-            workspaceDock?.UpdateTime(FormatTime(clock?.RemainingSeconds ?? 0));
+            workspaceDock?.UpdateTime(WorkspaceCountdown);
             if (Stopwatch.GetElapsedTime(lastWorkspaceRefresh).TotalSeconds >= 2) RefreshWorkspaceDock();
         }
         catch (Exception error) { Finish("interrupted", "白名单保护已恢复桌面，本轮中断，已保存的时长保留：" + error.Message); }
@@ -204,8 +209,8 @@ public partial class MainWindow
             var label = AppDisplayName(window.ProcessName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? window.ProcessName : window.ProcessName + ".exe");
             if (groups[window.ProcessName] > 1) label += $" · 窗口 {occurrence[window.ProcessName]}";
             return new WorkspaceWindowChoice(window.Handle, label);
-        }).ToArray());
-        workspaceDock.UpdateTime(FormatTime(clock?.RemainingSeconds ?? 0));
+        }).Concat(DailyLaunchChoices(windows)).ToArray());
+        workspaceDock.UpdateTime(WorkspaceCountdown);
     }
     internal void ReleaseWorkspace()
     {

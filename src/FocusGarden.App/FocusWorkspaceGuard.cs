@@ -14,6 +14,7 @@ internal interface IFocusWorkspaceSession : IDisposable
     IReadOnlyList<FocusWorkspaceAppWindow> GetAllowedWindows();
     bool ActivateAllowedWindow(nint handle);
     void SetBackdropWindows(IReadOnlyList<nint> handles);
+    void UpdateScheduledPolicy(FocusApplicationPolicy policy);
 }
 
 internal interface IFocusShortcutLease : IDisposable { bool IsHealthy { get; } }
@@ -39,7 +40,7 @@ internal interface IFocusWorkspacePlatform
 internal sealed class FocusWorkspaceGuard : IFocusWorkspaceSession
 {
     internal const double HeartbeatTimeoutSeconds = 8;
-    private readonly FocusApplicationPolicy policy;
+    private FocusApplicationPolicy policy;
     private readonly IFocusWorkspacePlatform platform;
     private readonly nint owner;
     private readonly IReadOnlyList<FocusTaskbarWindow> taskbars;
@@ -77,8 +78,8 @@ internal sealed class FocusWorkspaceGuard : IFocusWorkspaceSession
         {
             cancellationToken.ThrowIfCancellationRequested();
             var windows = guard.GetAllowedWindows();
-            if (windows.Count == 0) throw new InvalidOperationException("请先打开至少一个白名单应用，再开始专注。");
-            guard.lastAllowed = windows[0].Handle;
+            if (windows.Count == 0 && !policy.IsScheduled) throw new InvalidOperationException("请先打开至少一个白名单应用，再开始专注。");
+            guard.lastAllowed = windows.FirstOrDefault()?.Handle ?? 0;
             // The independent helper acknowledges the restore snapshot before any shell window is hidden.
             guard.recovery = await platform.StartRecoveryAsync(guard.taskbars, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
@@ -91,7 +92,7 @@ internal sealed class FocusWorkspaceGuard : IFocusWorkspaceSession
             guard.activated = true;
             foreach (var bar in guard.taskbars) platform.SetTaskbarVisible((nint)bar.Handle, false);
             guard.Pulse();
-            if (!guard.ActivateAllowedWindow(guard.lastAllowed))
+            if (!policy.IsScheduled && !guard.ActivateAllowedWindow(guard.lastAllowed))
                 throw new InvalidOperationException("无法切换到白名单应用，本轮未开启限制。");
             return guard;
         }
@@ -100,6 +101,15 @@ internal sealed class FocusWorkspaceGuard : IFocusWorkspaceSession
 
     private bool HasLiveHeartbeat() => Volatile.Read(ref disposed) == 0 &&
         platform.ElapsedSeconds(Interlocked.Read(ref lastHeartbeat)) < HeartbeatTimeoutSeconds;
+
+    public void UpdateScheduledPolicy(FocusApplicationPolicy next)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        if (!policy.IsScheduled || !next.IsScheduled || policy.HideTaskbar != next.HideTaskbar || policy.BlockDesktopShortcuts != next.BlockDesktopShortcuts)
+            throw new InvalidOperationException("仅全天模式允许按计划切换白名单。");
+        policy = next;
+        Pulse();
+    }
 
     public void Pulse()
     {

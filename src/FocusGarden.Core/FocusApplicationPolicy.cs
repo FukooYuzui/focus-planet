@@ -27,6 +27,15 @@ public sealed class FocusApplicationPolicy
     public bool HideTaskbar { get; }
     public bool BlockDesktopShortcuts { get; }
     public ReadOnlyCollection<string> AllowedApps { get; }
+    public bool IsScheduled { get; private init; }
+    public bool AllowAllApplications { get; private init; }
+
+    public static FocusApplicationPolicy CreateScheduled(string[] names, bool allowAllApplications = false)
+    {
+        var settings = new FocusSettings { WhitelistEnabled = true, AllowedApps = names };
+        return new(settings, NormalizeAllowedApps(names, false), [])
+        { IsScheduled = true, AllowAllApplications = allowAllApplications };
+    }
 
     /// <summary>Validate before beginning focus; later settings mutations cannot change this session.</summary>
     public static FocusApplicationPolicy Create(FocusSettings settings)
@@ -55,7 +64,7 @@ public sealed class FocusApplicationPolicy
         if (isOwnProcess) return true;
         var name = AppRules.NormalizeProcessName(processName);
         if (SafetyApps.Contains(name)) return true;
-        return WhitelistEnabled ? allowed.Contains(name) : !blocked.Contains(name);
+        return WhitelistEnabled ? AllowAllApplications || allowed.Contains(name) : !blocked.Contains(name);
     }
 
     public static bool IsSystemSafetyApp(string processName) =>

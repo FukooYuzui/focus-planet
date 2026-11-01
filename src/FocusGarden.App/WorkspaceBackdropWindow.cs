@@ -30,6 +30,9 @@ internal sealed class WorkspaceBackdropWindow : Window
     };
     private MonitorArea? monitor;
     private bool allowClose;
+    private StackPanel focusContent = null!;
+    private DailyTaskPanel? dailyTaskPanel;
+    private TextBlock? dailyHeader;
     private bool watchingDisplays;
     internal event EventHandler? DisplayConfigurationChanged;
 
@@ -54,6 +57,7 @@ internal sealed class WorkspaceBackdropWindow : Window
             VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center,
             MaxWidth = 900, Margin = new Thickness(32)
         };
+        focusContent = content;
         content.Children.Add(new TextBlock
         {
             Text = "专 注 星 球", FontSize = 18, Foreground = (Brush)FindResource("Green"),
@@ -174,6 +178,23 @@ internal sealed class WorkspaceBackdropWindow : Window
         if (countdown.Text != time) countdown.Text = time;
         var text = "现在  " + DateTime.Now.ToString("yyyy年M月d日 dddd  HH:mm:ss", CultureInfo.GetCultureInfo("zh-CN"));
         if (currentTime.Text != text) currentTime.Text = text;
+    }
+
+    internal void ConfigureDaily(Func<string, int, Task<string?>> start, Action stop)
+    {
+        countdown.FontSize = 70;
+        dailyHeader = new TextBlock { Foreground = LightText, FontSize = 16, TextAlignment = TextAlignment.Center, Margin = new Thickness(0, 10, 0, 12) };
+        dailyTaskPanel = new DailyTaskPanel(start, stop) { Margin = new Thickness(0, 12, 0, 0) };
+        focusContent.Children.Clear();
+        focusContent.Children.Add(currentTime); focusContent.Children.Add(dailyHeader); focusContent.Children.Add(countdown);
+        focusContent.Children.Add(dailyTaskPanel);
+        focusContent.Children.Add(new TextBlock { Foreground = SecondaryText, Text = "强制退出全天模式：Ctrl + Alt + Shift + F12", TextAlignment = TextAlignment.Center, FontSize = 13, Margin = new Thickness(0, 20, 0, 0) });
+        focusContent.Children.Add(new TextBlock { Foreground = SecondaryText, Text = "系统恢复：Ctrl + Alt + Del / Ctrl + Shift + Esc / Win + L", TextAlignment = TextAlignment.Center, FontSize = 11, Margin = new Thickness(0, 8, 0, 0) });
+    }
+    internal void UpdateDailyTask(bool enabled, bool running, string message, string header)
+    {
+        dailyTaskPanel?.Update(enabled, running, message);
+        if (dailyHeader != null && dailyHeader.Text != header) dailyHeader.Text = header;
     }
 
     internal void Release()

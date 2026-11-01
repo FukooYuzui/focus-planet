@@ -16,7 +16,7 @@ using FocusGarden.Core;
 using Microsoft.Data.Sqlite;
 using Microsoft.Win32;
 
-internal static class Program
+internal static partial class Program
 {
     private const BindingFlags Private = BindingFlags.NonPublic | BindingFlags.Instance;
     private static readonly string Root = Path.Combine(Path.GetTempPath(), "FocusPlanet-StrictFocus-" + Guid.NewGuid().ToString("N"));
@@ -518,6 +518,7 @@ internal static class Program
                 Equal(snapshot, f.AllRows()); f.AssertHistory();
             });
             RunWorkspaceCases();
+            RunDailyCases();
         }
         finally { app.Shutdown(); }
         Console.WriteLine($"Strict focus: {passed} passed, {failed} failed; synthetic fixtures: {Root}");
@@ -861,6 +862,8 @@ internal static class Program
 
     private sealed class FakeWorkspaceSession : IFocusWorkspaceSession
     {
+        public FocusApplicationPolicy? ScheduledPolicy;
+        public void UpdateScheduledPolicy(FocusApplicationPolicy policy) { ScheduledPolicy = policy; }
         public int DisposeCalls, PulseCalls, BackdropRegistrations;
         public bool FailPulse, FailDispose, FailBackdropRegistration;
         public IReadOnlyList<nint> BackdropHandles = [];

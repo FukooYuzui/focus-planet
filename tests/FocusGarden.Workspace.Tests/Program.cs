@@ -24,6 +24,32 @@ FocusApplicationPolicy Policy(bool hide = true, bool keys = true) => FocusApplic
     WhitelistEnabled = true, AllowedApps = ["word.exe", "notepad.exe"], HideTaskbar = hide, BlockDesktopShortcuts = keys
 });
 
+await Test("scheduled self-only start needs no open work application and updates allowed apps without releasing leases", async () =>
+{
+    var platform = new FakePlatform();
+    using var guard = await FocusWorkspaceGuard.StartAsync(FocusApplicationPolicy.CreateScheduled([]), 100, platform);
+    Assert(guard.GetAllowedWindows().Count == 0);
+    platform.Events.Clear();
+    guard.UpdateScheduledPolicy(FocusApplicationPolicy.CreateScheduled(["word"]));
+    Assert(guard.GetAllowedWindows().Select(w => w.Handle).SequenceEqual(new nint[] { 200 }));
+    platform.Foreground = new(300, 3, "notepad", false); guard.Pulse();
+    Assert(platform.Events.Contains("minimize:300"));
+    Assert(!platform.Keyboard.Disposed && !platform.Recovery.Disposed);
+    guard.UpdateScheduledPolicy(FocusApplicationPolicy.CreateScheduled([]));
+    Assert(!guard.ActivateAllowedWindow(200));
+});
+await Test("normal whitelist cannot be converted into a scheduled editable policy", async () =>
+{
+    var platform = new FakePlatform(); using var guard = await FocusWorkspaceGuard.StartAsync(Policy(), 100, platform);
+    await Throws<InvalidOperationException>(() => Check(() => guard.UpdateScheduledPolicy(FocusApplicationPolicy.CreateScheduled(["chrome"]))));
+    Assert(guard.GetAllowedWindows().Select(w => w.Handle).SequenceEqual(new nint[] { 200, 300 }));
+});
+await Test("daily force-exit combination passes the shortcut filter with all key releases", () => Check(() =>
+{
+    var keys = new FocusShortcutPolicy();
+    foreach (int key in new[] { 0xA2, 0xA4, 0xA0, 0x7B }) Assert(keys.Decide(key, true) == FocusKeyDecision.Pass);
+    foreach (int key in new[] { 0x7B, 0xA0, 0xA4, 0xA2 }) Assert(keys.Decide(key, false) == FocusKeyDecision.Pass);
+}));
 await Test("watchdog acknowledgement always precedes hiding taskbars", async () =>
 {
     var platform = new FakePlatform(); using var guard = await FocusWorkspaceGuard.StartAsync(Policy(), 100, platform);

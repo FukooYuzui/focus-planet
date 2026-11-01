@@ -53,6 +53,7 @@ public partial class MainWindow : Window
         bridge = new LocalBridge(App.DataDirectory);
         appearance = new FocusAppearance(App.DataDirectory);
         LoadSettingsUi();
+        InitializeDailyFocus();
         ApplyAppearance(); UpdateWallClock();
         if (appearance.LoadWarning != null) Status(appearance.LoadWarning);
         if (App.TestMode) { TestButton.Visibility = Visibility.Visible; Title += " [独立验收模式]"; }
@@ -62,12 +63,13 @@ public partial class MainWindow : Window
             hwndSource = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
             hwndSource.AddHook(WindowHook);
             hotkeyRegistered = NativeFocus.RegisterHotKey(hwndSource.Handle, 9081, 0x4003, 0x1B);
-            RefreshExitHint();
+            dailyHotkeyRegistered = NativeFocus.RegisterHotKey(hwndSource.Handle, 9082, 0x4007, 0x7B);
+            RefreshExitHint(); UpdateDailyUi();
         };
         SystemEvents.PowerModeChanged += PowerChanged;
         SystemEvents.SessionSwitch += SessionChanged;
         Closing += ClosingWindow;
-        Closed += (_, _) => { shuttingDown = true; timer.Stop(); ReleaseWorkspace(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); bridge.Dispose(); };
+        Closed += (_, _) => { shuttingDown = true; timer.Stop(); ReleaseWorkspace(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); if (dailyHotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9082); bridge.Dispose(); };
         InitializeDashboard();
         InitializePlanet();
         RefreshStatistics();
@@ -75,6 +77,10 @@ public partial class MainWindow : Window
     }
     private nint WindowHook(nint hwnd, int msg, nint wParam, nint lParam, ref bool handled)
     {
+        if (msg == 0x0312 && wParam == 9082)
+        {
+            ForceExitDailyFocus(); handled = true; return 0;
+        }
         if (msg == 0x0312 && wParam == 9081)
         {
             if (CanRequestEarlyExit()) Finish("emergency", "已紧急退出，应用限制已解除。");
@@ -92,12 +98,13 @@ public partial class MainWindow : Window
     }
     private void Page(string page)
     {
+        DailyPage.Visibility = page == "daily" ? Visibility.Visible : Visibility.Collapsed;
         PlanetPage.Visibility = page == "planet" ? Visibility.Visible : Visibility.Collapsed;
         FocusPage.Visibility = page == "focus" ? Visibility.Visible : Visibility.Collapsed;
         StatsPage.Visibility = page == "stats" ? Visibility.Visible : Visibility.Collapsed;
         RulesPage.Visibility = page == "rules" ? Visibility.Visible : Visibility.Collapsed;
-        PageTitle.Text = page switch { "planet" => "把每一份投入，变成一个小世界。", "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
-        PageSubtitle.Text = page switch { "planet" => "六个月的陪伴，从一颗荒凉星球出发。", "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；严格专注期间不能在程序内提前解除。", _ => "选一件小事，开始一段完整的专注。" };
+        PageTitle.Text = page switch { "daily" => "给一整天，安排清晰的节奏。", "planet" => "把每一份投入，变成一个小世界。", "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
+        PageSubtitle.Text = page switch { "daily" => "每日时段管理应用，任务钟到时提醒但不解除限制。", "planet" => "六个月的陪伴，从一颗荒凉星球出发。", "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；严格专注期间不能在程序内提前解除。", _ => "选一件小事，开始一段完整的专注。" };
         PageScroller.ScrollToTop();
         if (page is "focus" or "stats") RefreshStatistics();
         if (page == "focus" && dashboardReady) { RefreshUsageUi(); RefreshTokenUi(); }
@@ -128,7 +135,7 @@ public partial class MainWindow : Window
     }
     private void ChooseBackground(object sender, RoutedEventArgs e)
     {
-        if (clock != null) { Status("请在本轮结束后更换背景图片。"); return; }
+        if (clock != null || DailyActive) { Status("请在本轮结束后更换背景图片。"); return; }
         var dialog = new OpenFileDialog { Title = "选择专注背景图片", Filter = "图片文件|*.jpg;*.jpeg;*.png;*.bmp|所有文件|*.*", CheckFileExists = true };
         if (dialog.ShowDialog(this) != true) return;
         try { appearance.SelectImage(dialog.FileName); ApplyAppearance(); Status("背景已保存，主页与全屏专注都会使用这张图片。"); }
@@ -136,14 +143,14 @@ public partial class MainWindow : Window
     }
     private void ResetBackground(object sender, RoutedEventArgs e)
     {
-        if (clock != null) return;
+        if (clock != null || DailyActive) return;
         try { appearance.Reset(); ApplyAppearance(); Status("已恢复纯色背景，原始图片未改动。"); }
         catch (Exception ex) { Status("恢复纯色失败：" + ex.Message); }
     }
     private static string[] Lines(string text) => text.Split(['\r', '\n', ',', '，', ';'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
     private async Task<bool> SaveAllSettings()
     {
-        if (savingSettings || shuttingDown) return false;
+        if (savingSettings || shuttingDown || DailyActive || dailyStarting) return false;
         savingSettings = true;
         try
         {
@@ -172,7 +179,7 @@ public partial class MainWindow : Window
     private async void StartTest(object sender, RoutedEventArgs e) { if (App.TestMode) await Begin(true); }
     private async Task Begin(bool shortTest)
     {
-        if (clock != null || startingFocus || endingFocus || savingSettings || shuttingDown || travellingPlanet || desktopLocked || powerSuspended) return;
+        if (DailyActive || dailyStarting || dailyTaskStarting || !dailyEndTask.IsCompleted || clock != null || startingFocus || endingFocus || savingSettings || shuttingDown || travellingPlanet || desktopLocked || powerSuspended) return;
         var generation = Volatile.Read(ref sessionEventGeneration);
         startingFocus = true;
         SetupPanel.IsEnabled = false; WhitelistSettingsPanel.IsEnabled = false;
@@ -242,7 +249,7 @@ public partial class MainWindow : Window
     }
     private async void StartBreak(object sender, RoutedEventArgs e)
     {
-        if (clock != null || startingFocus || endingFocus || savingSettings || shuttingDown || travellingPlanet || desktopLocked || powerSuspended) return;
+        if (DailyActive || dailyStarting || dailyTaskStarting || !dailyEndTask.IsCompleted || clock != null || startingFocus || endingFocus || savingSettings || shuttingDown || travellingPlanet || desktopLocked || powerSuspended) return;
         var generation = Volatile.Read(ref sessionEventGeneration);
         startingFocus = true;
         try {
@@ -285,6 +292,7 @@ public partial class MainWindow : Window
         // Save focus progress before optional statistics and scene work. A slow UI
         // refresh is not evidence that the user ended or suspended this session.
         AdvanceFocus();
+        DailyTick();
         DashboardTick();
         PlanetTick();
         ApiStatus.Text = bridge.Error != null ? "本机连接服务不可用：" + bridge.Error : DateTimeOffset.UtcNow - bridge.LastContact < TimeSpan.FromSeconds(20) ? "● 浏览器扩展已连接（仅代表通信成功）" : "○ 等待扩展连接 · 本机服务已就绪";
@@ -344,6 +352,7 @@ public partial class MainWindow : Window
     private void EmergencyClick(object sender, RoutedEventArgs e) => ConfirmEmergency();
     private void ConfirmEmergency()
     {
+        if (DailyActive || dailyStarting) { Status("全天专注请按 Ctrl + Alt + Shift + F12 强制退出。"); return; }
         if (confirming || !CanRequestEarlyExit()) return;
         if (breaking) { Finish("emergency", "休息已结束。"); return; }
         confirming = true;
@@ -358,6 +367,7 @@ public partial class MainWindow : Window
     }
     private void Finish(string status, string message)
     {
+        if (DailyActive || dailyStarting) { StopDailyFocus(status, message, !desktopLocked && !powerSuspended); return; }
         if (clock == null) return;
         var id = sessionId;
         var writer = sessionWriter; sessionWriter = null;
@@ -379,7 +389,8 @@ public partial class MainWindow : Window
     }
     public void ReleaseForError()
     {
-        if (clock != null) Finish("interrupted", "本轮已中断，限制已解除，已保存的时长保留。");
+        if (DailyActive || dailyStarting) StopDailyFocus("interrupted", "全天专注已中断，限制已解除，已保存时长保留。", true);
+        else if (clock != null) Finish("interrupted", "本轮已中断，限制已解除，已保存的时长保留。");
         else { bridge.Publish(false, [], 0); ReleaseWorkspace(); immersion?.Release(); immersion = null; activeStrictFocus = false; }
     }
     private void PowerChanged(object sender, PowerModeChangedEventArgs e)
@@ -404,8 +415,8 @@ public partial class MainWindow : Window
     {
         if (allowClose) return;
         e.Cancel = true;
-        if (clock != null) { ConfirmEmergency(); return; }
-        if (startingFocus || savingSettings) { Status("正在保存设置，请稍后关闭。"); return; }
+        if (clock != null || DailyActive || dailyStarting) { ConfirmEmergency(); return; }
+        if (startingFocus || savingSettings || dailyTaskStarting || dailyPlanSaving) { Status("正在保存设置，请稍后关闭。"); return; }
         if (closeTask == null || closeTask.IsCompleted) closeTask = CloseFromRequestAsync();
     }
     private void RefreshApps(object sender, RoutedEventArgs e) => RefreshAppList();
@@ -420,7 +431,7 @@ public partial class MainWindow : Window
     }
     private void AddApp(object sender, RoutedEventArgs e)
     {
-        if (clock != null) { Status("请在本轮结束后编辑限制。"); return; }
+        if (clock != null || DailyActive) { Status("请在本轮结束后编辑限制。"); return; }
         if (RunningApps.SelectedItem is string name) AppsInput.Text = string.Join(Environment.NewLine, Lines(AppsInput.Text).Append(name).Distinct(StringComparer.OrdinalIgnoreCase));
     }
     private void CopyToken(object sender, RoutedEventArgs e) { Clipboard.SetText(bridge.Token); Status("配对码已复制，请粘贴到浏览器扩展中。配对码只供本机使用。"); }

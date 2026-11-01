@@ -62,6 +62,9 @@ public partial class MainWindow
         await focusWork.DrainAsync();
         await progressTask;
         await finishTask;
+        await dailyWriteTask;
+        await dailyEndTask;
+        await dailyPlanTask;
     }
 
     // Also used by isolated UI tests; it waits for actual background work rather than substituting synchronous behavior.
@@ -77,7 +80,7 @@ public partial class MainWindow
     internal async Task PrepareCloseAsync()
     {
         if (allowClose) return;
-        if (clock != null || startingFocus || savingSettings) throw new InvalidOperationException("请先结束当前专注或等待开始操作完成。");
+        if (DailyActive || dailyStarting || dailyTaskStarting || dailyPlanSaving || clock != null || startingFocus || savingSettings) throw new InvalidOperationException("请先结束当前专注或等待开始操作完成。");
         shuttingDown = true; timer.Stop();
         ReleaseWorkspace();
         StartButton.IsEnabled = false; BreakButton.IsEnabled = false; TestButton.IsEnabled = false;
