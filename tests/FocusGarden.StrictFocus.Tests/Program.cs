@@ -542,7 +542,7 @@ internal static class Program
             f.AssertReleased("emergency", 1, 1); f.AssertHistory();
         });
 
-        Run("whitelist start captures multiple applications and suppresses immersive fullscreen for this session", () =>
+        Run("whitelist start captures multiple applications and keeps its focus backdrop independent of main-window minimization", () =>
         {
             using var f = new Fixture();
             ConfigureWhitelist(f);
@@ -562,6 +562,19 @@ internal static class Program
             var dock = Field<WorkspaceDockWindow>(f.Window, "workspaceDock");
             Assert(dock.Owner is null && !dock.IsVisible);
             Assert(!f.Window.OwnedWindows.OfType<Window>().Contains(dock));
+            var backdrop = Field<IReadOnlyList<WorkspaceBackdropWindow>>(f.Window, "workspaceBackdrops").Single();
+            bool backdropClosed = false; backdrop.Closed += (_, _) => backdropClosed = true;
+            Assert(backdrop.Owner is null && !backdrop.IsVisible && !backdrop.Topmost && !backdrop.ShowInTaskbar);
+            Assert(!f.Window.OwnedWindows.OfType<Window>().Contains(backdrop));
+            Equal(1, guard.BackdropRegistrations); Equal(0, guard.BackdropHandles.Count);
+            Equal("01:00", Find<TextBlock>(backdrop, "WorkspaceCountdown").Text);
+            Equal("strict test", Find<TextBlock>(backdrop, "WorkspaceTask").Text);
+            Assert(!string.IsNullOrWhiteSpace(Find<TextBlock>(backdrop, "WorkspaceCurrentTime").Text));
+            f.Window.WindowState = WindowState.Minimized;
+            Find<Button>(dock, "WorkspaceFocusButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Equal(WindowState.Minimized, f.Window.WindowState);
+            Assert(!backdropClosed && !backdrop.IsVisible);
+            Render(backdrop, "whitelist-desktop-focus-strict-1440.png", 1440, 900);
             Render(f.Window, "whitelist-focus-active-960.png", 960, 900);
             Assert(Field<object?>(f.Window, "immersion") is null);
             Equal(Visibility.Collapsed, Field<Button>(f.Window, "FullscreenButton").Visibility);
@@ -574,11 +587,13 @@ internal static class Program
             Field<TextBox>(f.Window, "AllowedAppsInput").Text = "changed.exe";
             Field<CheckBox>(f.Window, "WhitelistEnabledCheck").IsChecked = false;
             f.Tick(1.1);
+            Equal("00:59", Find<TextBlock>(backdrop, "WorkspaceCountdown").Text);
             Assert(guard.PulseCalls > 0 && policy.IsAllowed("synthetic-editor.exe") && !policy.IsAllowed("changed.exe"));
             Assert(SendHotkey(f.Window, 9081)); Assert(Field<object?>(f.Window, "clock") is not null);
             Equal(0, guard.DisposeCalls);
             for (var i = 0; i < 25 && Field<object?>(f.Window, "clock") is not null; i++) f.Tick(3.05);
             f.AssertReleased("completed", 60, 60); Equal(1, guard.DisposeCalls);
+            Assert(backdropClosed);
             Assert(Field<IFocusWorkspaceSession?>(f.Window, "workspaceSession") is null);
             f.AssertHistory();
         });
@@ -639,8 +654,12 @@ internal static class Program
             using var f = new Fixture(false); ConfigureWhitelist(f);
             var guard = new FakeWorkspaceSession();
             SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
-            f.Start(); f.Tick(2.1); Assert(SendHotkey(f.Window, 9081));
+            f.Start();
+            var backdrop = Field<IReadOnlyList<WorkspaceBackdropWindow>>(f.Window, "workspaceBackdrops").Single();
+            bool closed = false; backdrop.Closed += (_, _) => closed = true;
+            f.Tick(2.1); Assert(SendHotkey(f.Window, 9081));
             f.AssertReleased("emergency", 2, 2); Equal(1, guard.DisposeCalls);
+            Assert(closed);
             f.Window.ReleaseForError(); Equal(1, guard.DisposeCalls); f.AssertHistory();
         });
 
@@ -651,6 +670,8 @@ internal static class Program
                 var guard = new FakeWorkspaceSession();
                 SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
                 f.Start(); f.Tick(2.1);
+                var backdrop = Field<IReadOnlyList<WorkspaceBackdropWindow>>(f.Window, "workspaceBackdrops").Single();
+                bool closed = false; backdrop.Closed += (_, _) => closed = true;
                 using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
                 var queue = Field<SerialWorkQueue>(f.Window, "focusWork");
                 var blocker = queue.RunAsync(() => { entered.Set(); release.Wait(); }); WaitUntil(() => entered.IsSet);
@@ -658,6 +679,7 @@ internal static class Program
                 {
                     Call(f.Window, "SessionChanged", f.Window, new SessionSwitchEventArgs(reason)); Pump();
                     Equal(1, guard.DisposeCalls); Assert(Field<object?>(f.Window, "clock") is null && !f.Bridge.active);
+                    Assert(closed && Field<IReadOnlyList<WorkspaceBackdropWindow>>(f.Window, "workspaceBackdrops").Count == 0);
                     Assert(!Field<Task>(f.Window, "finishTask").IsCompleted);
                 }
                 finally { release.Set(); }
@@ -683,8 +705,11 @@ internal static class Program
             var guard = new FakeWorkspaceSession();
             SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
             f.Start(); f.Tick(2.1); guard.FailPulse = true;
+            var backdrop = Field<IReadOnlyList<WorkspaceBackdropWindow>>(f.Window, "workspaceBackdrops").Single();
+            bool closed = false; backdrop.Closed += (_, _) => closed = true;
             f.Tick(.01);
             f.AssertReleased("interrupted", 2, 2); Equal(1, guard.DisposeCalls); f.AssertHistory();
+            Assert(closed);
         });
 
         Run("a throwing workspace disposal cannot prevent session release or duplicate saved progress", () =>
@@ -693,11 +718,83 @@ internal static class Program
             var guard = new FakeWorkspaceSession { FailDispose = true };
             SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
             f.Start(); f.Tick(2.1);
+            var backdrop = Field<IReadOnlyList<WorkspaceBackdropWindow>>(f.Window, "workspaceBackdrops").Single();
+            bool closed = false; backdrop.Closed += (_, _) => closed = true;
             f.Window.ReleaseForError();
             f.AssertReleased("interrupted", 2, 2); Equal(1, guard.DisposeCalls);
             Assert(Field<IFocusWorkspaceSession?>(f.Window, "workspaceSession") is null);
             var saved = f.AllRows(); f.Window.ReleaseForError(); f.Drain(); Equal(saved, f.AllRows());
             Equal(1, guard.DisposeCalls); f.AssertHistory();
+            Assert(closed);
+        });
+
+        Run("backdrop registration failure releases every created focus surface and preserves history", () =>
+        {
+            using var f = new Fixture(); ConfigureWhitelist(f);
+            var guard = new FakeWorkspaceSession { FailBackdropRegistration = true };
+            SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
+            Call(f.Window, "Begin", false); f.Drain();
+            f.AssertReleased("interrupted", 0, 0);
+            Equal(1, guard.DisposeCalls); Equal(1, guard.BackdropRegistrations);
+            Assert(!Application.Current.Windows.OfType<WorkspaceBackdropWindow>().Any());
+            f.AssertHistory();
+        });
+
+        foreach (var hideTaskbar in new[] { true, false })
+            Run("display configuration change releases focus surfaces and exact saved seconds with taskbar hiding " + hideTaskbar, () =>
+            {
+                using var f = new Fixture(); ConfigureWhitelist(f);
+                Field<CheckBox>(f.Window, "HideTaskbarCheck").IsChecked = hideTaskbar;
+                var guard = new FakeWorkspaceSession();
+                SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
+                f.Start(); f.Tick(2.1);
+                var backdrop = Field<IReadOnlyList<WorkspaceBackdropWindow>>(f.Window, "workspaceBackdrops").Single();
+                bool closed = false; backdrop.Closed += (_, _) => closed = true;
+                Assert(!Field<bool>(backdrop, "watchingDisplays"));
+                backdrop.NotifyDisplayConfigurationChanged();
+                f.AssertReleased("interrupted", 2, 2);
+                Assert(closed); Equal(1, guard.DisposeCalls);
+                var after = f.AllRows(); backdrop.NotifyDisplayConfigurationChanged(); f.Drain();
+                Equal(after, f.AllRows()); Equal(1, guard.DisposeCalls); f.AssertHistory();
+            });
+
+        Run("strict backdrop rejects button Esc and close while an explicit release closes it once", () =>
+        {
+            using var f = new Fixture(); ConfigureWhitelist(f);
+            var guard = new FakeWorkspaceSession();
+            SetWorkspaceFactory(f, (_, _, _) => Task.FromResult<IFocusWorkspaceSession>(guard));
+            f.Start(); f.Tick(2.1);
+            var backdrop = Field<IReadOnlyList<WorkspaceBackdropWindow>>(f.Window, "workspaceBackdrops").Single();
+            var before = f.AllRows(); var button = Find<Button>(backdrop, "EmergencyExitButton");
+            Assert(!button.IsEnabled); Assert(Find<TextBlock>(backdrop, "ExitHint").Text.Contains("严格专注"));
+            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Assert(Escape(backdrop).Handled);
+            int closeCount = 0; backdrop.Closed += (_, _) => closeCount++;
+            backdrop.Close(); Pump();
+            Equal(0, closeCount); Equal(before, f.AllRows()); Equal("running", f.Current.Status);
+            f.Window.ReleaseForError(); f.AssertReleased("interrupted", 2, 2);
+            Equal(1, closeCount); backdrop.Release(); Equal(1, closeCount); f.AssertHistory();
+        });
+
+        Run("ordinary backdrop offers visible focus time and preserves all emergency callbacks without opening desktop windows", () =>
+        {
+            using var f = new Fixture(false);
+            int callbacks = 0; var backdrop = new WorkspaceBackdropWindow("阅读一节教材，再完成三道习题", null, () => callbacks++, false);
+            try
+            {
+                Assert(backdrop.Owner is null && !backdrop.IsVisible && !backdrop.Topmost);
+                Assert(!backdrop.ShowActivated && !backdrop.ShowInTaskbar);
+                backdrop.UpdateTime("24:37");
+                Equal("24:37", Find<TextBlock>(backdrop, "WorkspaceCountdown").Text);
+                Assert(!string.IsNullOrWhiteSpace(Find<TextBlock>(backdrop, "WorkspaceCurrentTime").Text));
+                var button = Find<Button>(backdrop, "EmergencyExitButton"); Assert(button.IsEnabled);
+                button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); Equal(1, callbacks);
+                Assert(Escape(backdrop).Handled); Equal(2, callbacks);
+                backdrop.Close(); Pump(); Equal(3, callbacks);
+                Render(backdrop, "whitelist-desktop-focus-1440.png", 1440, 900);
+                Render(backdrop, "whitelist-desktop-focus-portrait.png", 720, 1280);
+                f.AssertHistory();
+            }
+            finally { backdrop.Release(); }
         });
 
         Run("break mode never creates a whitelist guard or hides system surfaces", () =>
@@ -764,8 +861,14 @@ internal static class Program
 
     private sealed class FakeWorkspaceSession : IFocusWorkspaceSession
     {
-        public int DisposeCalls, PulseCalls;
-        public bool FailPulse, FailDispose;
+        public int DisposeCalls, PulseCalls, BackdropRegistrations;
+        public bool FailPulse, FailDispose, FailBackdropRegistration;
+        public IReadOnlyList<nint> BackdropHandles = [];
+        public void SetBackdropWindows(IReadOnlyList<nint> handles)
+        {
+            BackdropRegistrations++; BackdropHandles = handles.ToArray();
+            if (FailBackdropRegistration) throw new IOException("synthetic backdrop registration failure");
+        }
         public void Pulse()
         {
             PulseCalls++;
@@ -944,6 +1047,8 @@ internal static class Program
             Assert(Field<object?>(Window, "clock") is null); Assert(!Field<bool>(Window, "activeStrictFocus"));
             Assert(!Bridge.active); Equal(status, Current.Status); Equal(seconds, Current.ElapsedSeconds); Equal(days, CurrentDaySeconds());
             Assert(Field<FrameworkElement>(Window, "SetupPanel").IsEnabled);
+            Assert(Field<WorkspaceDockWindow?>(Window, "workspaceDock") is null);
+            Equal(0, Field<IReadOnlyList<WorkspaceBackdropWindow>>(Window, "workspaceBackdrops").Count);
         }
         public string AllRows() => Snapshot(false);
         public void AssertHistory() => Equal(history, Snapshot(true));

@@ -4,6 +4,7 @@ using FocusGarden.Core;
 
 if (args is ["--verify-published-helper", var targetExecutable])
     return await PublishedHelperProbe.RunAsync(targetExecutable);
+if (args is ["--verify-native-stack"]) return NativeStackProbe.Run();
 if (await FocusShellWatchdog.TryRunAsync(args) is { } helperExit) return helperExit;
 int passed = 0, failed = 0;
 void Assert(bool condition, string? message = null) { if (!condition) throw new Exception(message ?? "Assertion failed"); }
@@ -85,12 +86,13 @@ await Test("permitted foreground apps and recovery tools are not repeatedly reac
     }
     Assert(!platform.Events.Any(e => e.StartsWith("activate:") || e.StartsWith("minimize:")));
 });
-await Test("unlisted app is minimized and last allowed app regains focus without process termination", async () =>
+await Test("unlisted app is minimized and focus screen returns without reopening an allowed app", async () =>
 {
     var platform = new FakePlatform(); using var guard = await FocusWorkspaceGuard.StartAsync(Policy(), 100, platform);
     platform.Foreground = new(300, 3, "notepad", false); guard.Pulse();
     platform.Events.Clear(); platform.Foreground = new(400, 4, "chrome", false); guard.Pulse();
-    Assert(platform.Events.Contains("minimize:400") && platform.Events.Contains("activate:300"));
+    Assert(platform.Events.Contains("minimize:400") && platform.Events.Contains("activate:100"));
+    Assert(!platform.Events.Contains("activate:300"));
 });
 await Test("desktop returns to owned focus window when allowed apps have closed", async () =>
 {
@@ -99,6 +101,109 @@ await Test("desktop returns to owned focus window when allowed apps have closed"
     platform.Foreground = new(500, 5, "explorer", true); platform.Events.Clear(); guard.Pulse();
     Assert(platform.Events.Contains("activate:100") && !platform.Events.Any(e => e.StartsWith("minimize:")));
 });
+await Test("desktop identity takes priority over a permitted process name", async () =>
+{
+    var policy = FocusApplicationPolicy.Create(new FocusSettings { WhitelistEnabled = true, AllowedApps = ["word"] });
+    var platform = new FakePlatform(); platform.Windows.Add(new(101, 1, "focusgarden", false));
+    using var guard = await FocusWorkspaceGuard.StartAsync(policy, 100, platform);
+    guard.SetBackdropWindows([101]);
+    platform.Foreground = new(500, 5, "word", true); platform.Events.Clear(); guard.Pulse();
+    Assert(platform.Events.Contains("activate:101") && !platform.Events.Contains("activate:200"));
+    Assert(!platform.Events.Any(e => e.StartsWith("minimize:")));
+    platform.Foreground = new(501, 5, "word", false); platform.Events.Clear(); guard.Pulse();
+    Assert(!platform.Events.Any(e => e.StartsWith("activate:") || e.StartsWith("minimize:")));
+});
+await Test("unlisted foreground returns to registered focus backdrop without terminating a process", async () =>
+{
+    var platform = new FakePlatform(); platform.Windows.Add(new(101, 1, "focusgarden", false));
+    using var guard = await FocusWorkspaceGuard.StartAsync(Policy(), 100, platform); guard.SetBackdropWindows([101]);
+    platform.Foreground = new(400, 4, "chrome", false); platform.Events.Clear(); guard.Pulse();
+    Assert(platform.Events.Contains("minimize:400") && platform.Events.Contains("activate:101"));
+    Assert(!platform.OrderedPermitted.Contains((nint)200) && !platform.OrderedPermitted.Contains((nint)300));
+});
+await Test("focus view stays in front when dock or owned modal becomes foreground until an allowed app is chosen", async () =>
+{
+    var platform = new FakePlatform();
+    platform.Windows.AddRange([new(101, 1, "focusgarden", false), new(102, 1, "focusgarden", false, false, true), new(103, 1, "focusgarden", false)]);
+    using var guard = await FocusWorkspaceGuard.StartAsync(Policy(), 100, platform); guard.SetBackdropWindows([101]);
+    foreach (var handle in new nint[] { 101, 102, 103 })
+    {
+        platform.Foreground = platform.Windows.Single(w => w.Handle == handle); guard.Pulse();
+        Assert(!platform.OrderedPermitted.Contains((nint)200) && !platform.OrderedPermitted.Contains((nint)100));
+        Assert(platform.OrderedPermitted.Contains((nint)103));
+    }
+    Assert(guard.ActivateAllowedWindow(200));
+    Assert(platform.OrderedPermitted.Contains((nint)200) && platform.OrderedPermitted.Contains((nint)300));
+    platform.Foreground = new(300, 3, "notepad", false); guard.Pulse();
+    Assert(platform.OrderedPermitted.Contains((nint)200));
+});
+await Test("backdrop registration clones handles and rejects foreign missing or desktop windows", async () =>
+{
+    var platform = new FakePlatform(); platform.Windows.Add(new(101, 1, "focusgarden", false));
+    platform.Windows.Add(new(102, 1, "focusgarden", true));
+    using var guard = await FocusWorkspaceGuard.StartAsync(Policy(), 100, platform);
+    var handles = new nint[] { 101 }; guard.SetBackdropWindows(handles); handles[0] = 200;
+    foreach (var invalid in new nint[] { 0, 200, 999, 102 })
+        await Throws<ArgumentException>(() => Check(() => guard.SetBackdropWindows([invalid])));
+    platform.Foreground = new(500, 5, "explorer", true); platform.Events.Clear(); guard.Pulse();
+    Assert(platform.Events.Contains("activate:101"));
+});
+await Test("missing backdrop is reported instead of silently exposing the desktop", async () =>
+{
+    var platform = new FakePlatform(); platform.Windows.Add(new(101, 1, "focusgarden", false));
+    using var guard = await FocusWorkspaceGuard.StartAsync(Policy(), 100, platform); guard.SetBackdropWindows([101]);
+    platform.Windows.RemoveAll(w => w.Handle == 101);
+    await Throws<InvalidOperationException>(() => Check(guard.Pulse));
+});
+await Test("already minimized forbidden snapshot does not fail foreground enforcement", async () =>
+{
+    var platform = new FakePlatform(); using var guard = await FocusWorkspaceGuard.StartAsync(Policy(), 100, platform);
+    platform.Foreground = new(400, 4, "chrome", false, true); platform.FailMinimize = true;
+    platform.Events.Clear(); guard.Pulse();
+    Assert(!platform.Events.Contains("minimize:400") && platform.Events.Contains("activate:100"));
+});
+await Test("secure desktop is left untouched even with active backdrop windows", async () =>
+{
+    var platform = new FakePlatform(); platform.Windows.Add(new(101, 1, "focusgarden", false));
+    using var guard = await FocusWorkspaceGuard.StartAsync(Policy(), 100, platform); guard.SetBackdropWindows([101]);
+    platform.Foreground = null; platform.Events.Clear(); guard.Pulse();
+    Assert(!platform.Events.Any(e => e.StartsWith("order:") || e.StartsWith("activate:") || e.StartsWith("minimize:")));
+});
+await Test("stack planner does no work when allowed windows already cover the backdrop", () => Check(() =>
+{
+    FocusForegroundWindow[] windows = [new(200, 2, "word", false), new(300, 3, "notepad", false), new(101, 1, "focusgarden", false), new(400, 4, "chrome", false)];
+    Assert(FocusWorkspaceStack.Plan(windows, [101], [200, 300]).Count == 0);
+}));
+await Test("stack repair preserves allowed order and does not restore minimized or promote topmost windows", () => Check(() =>
+{
+    FocusForegroundWindow[] windows = [new(600, 6, "taskmgr", false, false, true), new(400, 4, "chrome", false),
+        new(300, 3, "notepad", false), new(101, 1, "focusgarden", false), new(200, 2, "word", false),
+        new(700, 7, "word", false, true), new(500, 5, "explorer", true), new(102, 1, "focusgarden", false)];
+    var plan = FocusWorkspaceStack.Plan(windows, [101, 102], [200, 300, 600, 700]);
+    Assert(plan.Select(p => p.Handle).SequenceEqual(new nint[] { 300, 200, 101, 102 }));
+    Assert(plan.Select(p => p.InsertAfter).SequenceEqual(new nint[] { 0, 300, 200, 101 }));
+    Assert(!plan.Any(p => p.Handle is 600 or 700 or 500));
+    var repaired = windows.Where(w => !w.IsMinimized && !w.IsTopmost && !w.IsDesktop).ToList();
+    foreach (var placement in plan)
+    {
+        var window = repaired.Single(w => w.Handle == placement.Handle); repaired.Remove(window);
+        var index = placement.InsertAfter == 0 ? 0 : repaired.FindIndex(w => w.Handle == placement.InsertAfter) + 1;
+        repaired.Insert(index, window);
+    }
+    Assert(FocusWorkspaceStack.Plan(repaired, [101, 102], [200, 300, 600, 700]).Count == 0);
+}));
+await Test("focus-view stack covers still-open work apps but leaves own modal above all backdrops", () => Check(() =>
+{
+    FocusForegroundWindow[] windows = [new(200, 2, "word", false), new(101, 1, "focusgarden", false), new(103, 1, "focusgarden", false), new(102, 1, "focusgarden", false)];
+    var plan = FocusWorkspaceStack.Plan(windows, [101, 102], [103]);
+    Assert(plan.Select(p => p.Handle).SequenceEqual(new nint[] { 103, 101, 102 }));
+    Assert(plan.Select(p => p.InsertAfter).SequenceEqual(new nint[] { 0, 103, 101 }));
+}));
+await Test("native stale minimized handle is a harmless no-op without any shell mutation", () => Check(() =>
+{
+    var native = new FocusWorkspaceNative();
+    Assert(native.Minimize((nint)(-1234567))); Assert(!native.Activate(0));
+}));
 await Test("picker contains only explicit allowed windows and cannot activate arbitrary handles", async () =>
 {
     var platform = new FakePlatform(); platform.Windows.Add(new(800, 8, "taskmgr", false)); platform.Windows.Add(new(400, 4, "chrome", false));
@@ -273,6 +378,11 @@ sealed class FakePlatform : IFocusWorkspacePlatform
     public bool IsWindow(nint handle) => Windows.Any(w => w.Handle == handle);
     public bool Minimize(nint handle) { Events.Add("minimize:" + handle); return !FailMinimize; }
     public bool Activate(nint handle) { Events.Add("activate:" + handle); return IsWindow(handle); }
+    public IReadOnlyList<nint> OrderedPermitted = [];
+    public void MaintainBackdropOrder(IReadOnlyList<nint> backdrops, IReadOnlyList<nint> permitted, IReadOnlyList<FocusForegroundWindow> windows)
+    {
+        Events.Add("order:" + string.Join(",", backdrops)); OrderedPermitted = permitted.ToArray();
+    }
     public Task<IFocusShortcutLease> InstallShortcutsAsync(Func<bool> isActive, CancellationToken token)
     {
         if (FailKeyboard) throw new IOException("synthetic keyboard failure");

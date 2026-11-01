@@ -35,7 +35,7 @@ internal sealed class WorkspaceDockWindow : Window
         title.MouseLeftButtonDown += (_, e) => { if (e.ButtonState == MouseButtonState.Pressed) DragMove(); };
         content.Children.Add(title);
         var actions = new DockPanel();
-        var main = new Button { Content = "专注星球", Padding = new Thickness(10, 7, 10, 7), FontSize = 12, Margin = new Thickness(8, 0, 0, 0) };
+        var main = new Button { Name = "WorkspaceFocusButton", Content = "专注界面", Padding = new Thickness(10, 7, 10, 7), FontSize = 12, Margin = new Thickness(8, 0, 0, 0) };
         main.Click += (_, _) => showMain(); DockPanel.SetDock(main, Dock.Right); actions.Children.Add(main);
         switchApp = new Button { Content = "切换", Padding = new Thickness(10, 7, 10, 7), FontSize = 12, Margin = new Thickness(8, 0, 0, 0) };
         switchApp.Click += (_, _) => { if (apps.SelectedItem is WorkspaceWindowChoice choice) activate(choice.Handle); };

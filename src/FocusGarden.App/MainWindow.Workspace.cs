@@ -14,6 +14,8 @@ public partial class MainWindow
     private IFocusWorkspaceSession? workspaceSession;
     private CancellationTokenSource? workspaceStartCancellation;
     private WorkspaceDockWindow? workspaceDock;
+    private IReadOnlyList<WorkspaceBackdropWindow> workspaceBackdrops = [];
+    private bool workspaceWindowsShown;
     private long lastWorkspaceRefresh;
     private bool refreshingAllowedApps;
     private string? workspaceReleaseWarning;
@@ -35,7 +37,7 @@ public partial class MainWindow
         var apps = Lines(AllowedAppsInput.Text).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         WhitelistSummary.Text = WhitelistEnabledCheck.IsChecked == true
             ? apps.Length == 0 ? "尚未选择应用。请先打开工作应用，再配置白名单。"
-                : $"已选 {apps.Length} 个应用 · 本轮使用工作模式，小面板可切换应用。"
+                : $"已选 {apps.Length} 个应用 · 桌面保持专注画面，小面板可切换应用。"
             : "白名单未启用；原有全屏和应用黑名单设置继续生效。";
     }
 
@@ -115,16 +117,46 @@ public partial class MainWindow
     {
         if (workspaceSession == null || clock == null) return;
         var current = workspaceSession;
+        workspaceWindowsShown = IsVisible;
+        Action emergency = () => { if (ReferenceEquals(workspaceSession, current)) ConfirmEmergency(); };
+        // No HWND creation or monitor manipulation in hidden synthetic fixtures.
+        workspaceBackdrops = workspaceWindowsShown
+            ? WorkspaceBackdropWindow.CreateForDisplays(currentTask, appearance.BackgroundImage, emergency, IsStrictFocusActive)
+            : [new WorkspaceBackdropWindow(currentTask, appearance.BackgroundImage, emergency, IsStrictFocusActive)];
+        foreach (var backdrop in workspaceBackdrops)
+        {
+            backdrop.DisplayConfigurationChanged += (_, _) =>
+            {
+                if (ReferenceEquals(workspaceSession, current))
+                    Finish("interrupted", "显示器配置发生变化，本轮已中断并恢复桌面；已保存的时长保留。");
+            };
+            backdrop.UpdateTime(FormatTime(clock.RemainingSeconds));
+            if (workspaceWindowsShown) backdrop.Show();
+        }
+        current.SetBackdropWindows(workspaceWindowsShown
+            ? workspaceBackdrops.Select(window => new WindowInteropHelper(window).Handle).ToArray()
+            : []);
         workspaceDock = new WorkspaceDockWindow(
             handle => { if (ReferenceEquals(workspaceSession, current)) ActivateWorkspaceApp(handle); },
-            () => { if (ReferenceEquals(workspaceSession, current)) { WindowState = WindowState.Normal; Show(); Activate(); Page("focus"); } },
+            () => { if (ReferenceEquals(workspaceSession, current)) ShowWorkspaceFocus(); },
             () => { if (ReferenceEquals(workspaceSession, current)) ConfirmEmergency(); }, IsStrictFocusActive);
         RefreshWorkspaceDock();
         // Hidden synthetic fixtures never show a window or register a desktop hotkey.
         // Keep the switcher available even when the user minimizes the main window.
-        if (IsVisible) workspaceDock.Show();
+        if (workspaceWindowsShown) workspaceDock.Show();
         var first = current.GetAllowedWindows().FirstOrDefault();
-        if (IsVisible && first != null) current.ActivateAllowedWindow(first.Handle);
+        if (workspaceWindowsShown && first != null) current.ActivateAllowedWindow(first.Handle);
+    }
+
+    private void ShowWorkspaceFocus()
+    {
+        if (workspaceSession == null || workspaceBackdrops.Count == 0) return;
+        var backdrop = workspaceBackdrops[0];
+        if (workspaceWindowsShown)
+        {
+            if (backdrop.WindowState == WindowState.Minimized) backdrop.WindowState = WindowState.Normal;
+            backdrop.Show(); backdrop.Activate();
+        }
     }
 
     private void ActivateWorkspaceApp(nint handle)
@@ -147,6 +179,13 @@ public partial class MainWindow
         try
         {
             workspaceSession.Pulse();
+            // Show Desktop may minimize tool windows too. Restore only our switcher,
+            // without activating it or reopening a deliberately minimized work app.
+            if (workspaceWindowsShown && workspaceDock is { } dock)
+            {
+                if (dock.WindowState == WindowState.Minimized) dock.WindowState = WindowState.Normal;
+                if (!dock.IsVisible) dock.Show();
+            }
             workspaceDock?.UpdateTime(FormatTime(clock?.RemainingSeconds ?? 0));
             if (Stopwatch.GetElapsedTime(lastWorkspaceRefresh).TotalSeconds >= 2) RefreshWorkspaceDock();
         }
@@ -170,6 +209,7 @@ public partial class MainWindow
     }
     internal void ReleaseWorkspace()
     {
+        workspaceWindowsShown = false;
         try { workspaceStartCancellation?.Cancel(); }
         catch (Exception error) { workspaceReleaseWarning = error.Message; }
         var session = workspaceSession; workspaceSession = null;
@@ -177,6 +217,9 @@ public partial class MainWindow
         catch (Exception error) { workspaceReleaseWarning = "桌面恢复报告异常，恢复助手将继续处理：" + error.Message; }
         var dock = workspaceDock; workspaceDock = null;
         try { dock?.Release(); } catch (Exception error) { workspaceReleaseWarning ??= error.Message; }
+        var backdrops = workspaceBackdrops; workspaceBackdrops = [];
+        foreach (var backdrop in backdrops)
+            try { backdrop.Release(); } catch (Exception error) { workspaceReleaseWarning ??= error.Message; }
     }
 
     private async Task CancelUnstartedSessionAsync()

@@ -25,7 +25,9 @@ internal sealed class FocusWorkspaceNative : IFocusWorkspacePlatform
         FocusShellNative.EnumWindows((window, _) =>
         {
             // Owned modal dialogs can be the only usable window of an application.
-            if (FocusShellNative.IsWindowVisible(window)) result.Add(Describe(window));
+            if (FocusShellNative.IsWindowVisible(window) &&
+                (DwmGetWindowAttribute(window, 14, out var cloaked, sizeof(int)) != 0 || cloaked == 0))
+                result.Add(Describe(window));
             return true;
         }, 0);
         return result;
@@ -44,19 +46,67 @@ internal sealed class FocusWorkspaceNative : IFocusWorkspacePlatform
             if (names.Count > 256) names.Clear();
             names[pid] = known = (name, Stopwatch.GetTimestamp());
         }
-        return new(handle, pid, known.Name, desktop);
+        var style = IntPtr.Size == 8 ? GetWindowLongPtr(handle, -20).ToInt64() : GetWindowLong(handle, -20);
+        return new(handle, pid, known.Name, desktop, IsIconic(handle), (style & 0x8) != 0);
     }
-    public bool Minimize(nint handle) => FocusShellNative.IsWindow(handle) && ShowWindowAsync(handle, 6);
+    public bool Minimize(nint handle)
+    {
+        // The foreground snapshot may already have closed or minimized while we inspected it.
+        if (!FocusShellNative.IsWindow(handle) || IsIconic(handle)) return true;
+        return ShowWindowAsync(handle, 6) || !FocusShellNative.IsWindow(handle) || IsIconic(handle);
+    }
     public bool Activate(nint handle)
     {
         if (!FocusShellNative.IsWindow(handle)) return false;
-        if (IsIconic(handle) && !ShowWindowAsync(handle, 9)) return false;
-        if (SetForegroundWindow(handle)) return true;
+        if (IsIconic(handle) && !ShowWindowAsync(handle, 9) && IsIconic(handle)) return false;
+        if (GetForegroundWindow() == handle || SetForegroundWindow(handle)) return true;
         var foregroundThread = GetWindowThreadProcessId(GetForegroundWindow(), out _);
         var currentThread = GetCurrentThreadId();
         if (foregroundThread == 0 || foregroundThread == currentThread || !AttachThreadInput(currentThread, foregroundThread, true)) return false;
         try { return SetForegroundWindow(handle); }
         finally { AttachThreadInput(currentThread, foregroundThread, false); }
+    }
+    public void MaintainBackdropOrder(IReadOnlyList<nint> backdrops, IReadOnlyList<nint> permitted, IReadOnlyList<FocusForegroundWindow> windows)
+    {
+        const uint flags = 0x0001 | 0x0002 | 0x0010 | 0x0200; // NOSIZE, NOMOVE, NOACTIVATE, NOOWNERZORDER
+        var snapshot = windows.ToList();
+        var restoredAny = false;
+        foreach (var handle in backdrops)
+        {
+            var index = snapshot.FindIndex(w => w.Handle == handle);
+            var state = index >= 0 ? snapshot[index] : Describe(handle);
+            if (!FocusShellNative.IsWindow(handle) || state.ProcessId != ProcessId)
+                throw new InvalidOperationException("专注背景窗口已失效。");
+            if (index < 0 && DwmGetWindowAttribute(handle, 14, out var cloaked, sizeof(int)) == 0 && cloaked != 0)
+                throw new InvalidOperationException("Windows 桌面已切换，本轮白名单保护已停止。");
+            // These are our own UI-thread windows. Restore them synchronously without activating
+            // an app which the user deliberately minimized, including after Show Desktop.
+            if (state.IsMinimized || index < 0)
+            {
+                ShowWindow(handle, 4); restoredAny = true;
+                if (IsIconic(handle) || !FocusShellNative.IsWindowVisible(handle))
+                    throw new InvalidOperationException("无法恢复专注背景。");
+            }
+            if (state.IsTopmost && !SetWindowPos(handle, (nint)(-2), 0, 0, 0, 0, flags))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "无法恢复专注背景层级。");
+            restoredAny |= state.IsTopmost;
+            var restored = state with { IsMinimized = false, IsTopmost = false };
+            if (index >= 0) snapshot[index] = restored;
+            else snapshot.Add(restored);
+        }
+        // Restoring our own window may have changed its z-order. Re-read only on that rare path;
+        // normal heartbeats use the single snapshot already captured by the guard.
+        if (restoredAny) snapshot = GetWindows().ToList();
+        foreach (var placement in FocusWorkspaceStack.Plan(snapshot, backdrops, permitted))
+        {
+            // A permitted app can close between enumeration and placement. It no longer needs
+            // to be above the backdrop; the next heartbeat recomputes the remaining order.
+            if (!FocusShellNative.IsWindow(placement.Handle)) continue;
+            if (placement.InsertAfter != 0 && !FocusShellNative.IsWindow(placement.InsertAfter)) continue;
+            if (!SetWindowPos(placement.Handle, placement.InsertAfter, 0, 0, 0, 0, flags) &&
+                backdrops.Contains(placement.Handle))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "无法显示专注背景。");
+        }
     }
     public Task<IFocusShortcutLease> InstallShortcutsAsync(Func<bool> isActive, CancellationToken cancellationToken) =>
         FocusKeyboardLease.StartAsync(isActive, cancellationToken);
@@ -67,9 +117,37 @@ internal sealed class FocusWorkspaceNative : IFocusWorkspacePlatform
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(nint window, out uint processId);
     [DllImport("user32.dll")] private static extern bool IsIconic(nint window);
     [DllImport("user32.dll")] private static extern bool ShowWindowAsync(nint window, int command);
+    [DllImport("user32.dll")] private static extern bool ShowWindow(nint window, int command);
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool SetWindowPos(nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern nint GetWindowLongPtr(nint window, int index);
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")] private static extern int GetWindowLong(nint window, int index);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(nint window);
     [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint first, uint second, bool attach);
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(nint window, int attribute, out int value, int size);
+}
+
+internal sealed record FocusWindowPlacement(nint Handle, nint InsertAfter);
+
+/// <summary>Compute the smallest prefix repair of normal windows; topmost styles and minimized apps are untouched.</summary>
+internal static class FocusWorkspaceStack
+{
+    internal static IReadOnlyList<FocusWindowPlacement> Plan(IReadOnlyList<FocusForegroundWindow> windows,
+        IReadOnlyList<nint> backdrops, IReadOnlyList<nint> permitted)
+    {
+        var current = windows.Where(w => !w.IsMinimized && !w.IsTopmost && !w.IsDesktop)
+            .Select(w => w.Handle).Distinct().ToList();
+        var desired = current.Where(h => permitted.Contains(h) && !backdrops.Contains(h))
+            .Concat(backdrops.Where(current.Contains)).Distinct().ToArray();
+        var result = new List<FocusWindowPlacement>();
+        for (var i = 0; i < desired.Length; i++)
+        {
+            if (current[i] == desired[i]) continue;
+            current.Remove(desired[i]); current.Insert(i, desired[i]);
+            result.Add(new(desired[i], i == 0 ? 0 : desired[i - 1]));
+        }
+        return result;
+    }
 }
 
 internal static class FocusShellNative

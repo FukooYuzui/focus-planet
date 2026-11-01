@@ -225,7 +225,7 @@ public partial class MainWindow : Window
                 try
                 {
                     ShowWorkspaceDock();
-                    Status("白名单专注已开始，通过浮动面板切换允许的应用。" + (activeStrictFocus ? "本轮到时恢复退出。" : "可在面板或主窗口结束本轮。"));
+                    Status("白名单专注已开始，返回桌面仍显示专注画面；通过浮动面板切换允许的应用。" + (activeStrictFocus ? "本轮到时恢复退出。" : "可在面板或专注画面结束本轮。"));
                 }
                 catch (Exception error) { Finish("interrupted", "白名单面板未能启动，限制已解除：" + error.Message); }
             }
@@ -330,6 +330,7 @@ public partial class MainWindow : Window
         if (clock == null) return;
         TimerText.Text = FormatTime(clock.RemainingSeconds); TimerProgress.Value = (double)clock.ElapsedSeconds / plannedSeconds;
         immersion?.UpdateTime(TimerText.Text);
+        foreach (var backdrop in workspaceBackdrops) backdrop.UpdateTime(TimerText.Text);
         Title = $"{TimerText.Text} · 专注星球 {App.CurrentVersion}" + (App.TestMode ? " [独立验收模式]" : "");
     }
     private static string FormatTime(int seconds) => $"{seconds / 60:00}:{seconds % 60:00}";
@@ -348,7 +349,9 @@ public partial class MainWindow : Window
         confirming = true;
         try
         {
-            var answer = MessageBox.Show(immersion ?? (Window)this, "立即结束本轮并解除限制？\n已记录的专注时长会保留，状态记为“提前结束”。\n\n扩展在下次同步时解除；若浏览器挂起，可禁用扩展。", "紧急退出", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No);
+            var dialogOwner = (Window?)immersion ?? workspaceBackdrops.FirstOrDefault(window => window.IsActive)
+                ?? (Window?)workspaceBackdrops.FirstOrDefault(window => window.IsVisible) ?? this;
+            var answer = MessageBox.Show(dialogOwner, "立即结束本轮并解除限制？\n已记录的专注时长会保留，状态记为“提前结束”。\n\n扩展在下次同步时解除；若浏览器挂起，可禁用扩展。", "紧急退出", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.No);
             if (answer == MessageBoxResult.Yes) Finish("emergency", "已提前结束，应用限制已解除；浏览器扩展将同步解除。");
         }
         finally { confirming = false; }

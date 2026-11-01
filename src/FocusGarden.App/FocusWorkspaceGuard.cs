@@ -5,13 +5,15 @@ namespace FocusGarden.App;
 
 internal sealed record FocusWorkspaceAppWindow(nint Handle, string ProcessName);
 internal sealed record FocusTaskbarWindow(long Handle, bool InitiallyVisible);
-internal sealed record FocusForegroundWindow(nint Handle, int ProcessId, string? ProcessName, bool IsDesktop);
+internal sealed record FocusForegroundWindow(nint Handle, int ProcessId, string? ProcessName, bool IsDesktop,
+    bool IsMinimized = false, bool IsTopmost = false);
 
 internal interface IFocusWorkspaceSession : IDisposable
 {
     void Pulse();
     IReadOnlyList<FocusWorkspaceAppWindow> GetAllowedWindows();
     bool ActivateAllowedWindow(nint handle);
+    void SetBackdropWindows(IReadOnlyList<nint> handles);
 }
 
 internal interface IFocusShortcutLease : IDisposable { bool IsHealthy { get; } }
@@ -28,6 +30,7 @@ internal interface IFocusWorkspacePlatform
     bool IsWindow(nint handle);
     bool Minimize(nint handle);
     bool Activate(nint handle);
+    void MaintainBackdropOrder(IReadOnlyList<nint> backdrops, IReadOnlyList<nint> permitted, IReadOnlyList<FocusForegroundWindow> windows);
     Task<IFocusShortcutLease> InstallShortcutsAsync(Func<bool> isActive, CancellationToken cancellationToken);
     Task<IFocusRecoveryLease> StartRecoveryAsync(IReadOnlyList<FocusTaskbarWindow> taskbars, CancellationToken cancellationToken);
 }
@@ -43,6 +46,8 @@ internal sealed class FocusWorkspaceGuard : IFocusWorkspaceSession
     private IFocusShortcutLease? keyboard;
     private IFocusRecoveryLease? recovery;
     private nint lastAllowed;
+    private nint[] backdrops = [];
+    private bool focusSurfaceActive;
     private long lastHeartbeat, lastTaskbarCheck;
     private int disposed;
     private bool activated;
@@ -120,20 +125,31 @@ internal sealed class FocusWorkspaceGuard : IFocusWorkspaceSession
         if (foreground is null || foreground.Handle == 0) return;
         if (Allowed(foreground))
         {
-            if (foreground.ProcessId != platform.ProcessId && !FocusApplicationPolicy.IsSystemSafetyApp(foreground.ProcessName!))
+            if (backdrops.Contains(foreground.Handle)) focusSurfaceActive = true;
+            else if (foreground.Handle == owner) focusSurfaceActive = false;
+            else if (foreground.ProcessId != platform.ProcessId && !FocusApplicationPolicy.IsSystemSafetyApp(foreground.ProcessName!))
+            {
                 lastAllowed = foreground.Handle;
+                focusSurfaceActive = false;
+            }
+            MaintainBackdropOrder();
             return;
         }
-        if (!foreground.IsDesktop && !platform.Minimize(foreground.Handle))
+        if (!foreground.IsDesktop && !foreground.IsMinimized && !platform.Minimize(foreground.Handle))
             throw new InvalidOperationException("无法拦回名单外窗口，本轮白名单保护已停止。");
-        var allowed = GetAllowedWindows();
-        var target = allowed.Any(w => w.Handle == lastAllowed) ? lastAllowed : allowed.FirstOrDefault()?.Handle ?? owner;
+        // Returning to the desktop means returning to focus, not restoring a minimized work app.
+        focusSurfaceActive = true;
+        MaintainBackdropOrder();
+        var target = backdrops.FirstOrDefault();
+        if (target == 0) target = owner;
         if (!platform.Activate(target))
             throw new InvalidOperationException("无法返回白名单工作区，本轮白名单保护已停止。");
     }
 
     private bool Allowed(FocusForegroundWindow window)
     {
+        // Shell surfaces never count as an allowed app, independent of process rules.
+        if (window.IsDesktop) return false;
         if (window.ProcessId == platform.ProcessId) return true;
         if (string.IsNullOrWhiteSpace(window.ProcessName)) return false;
         try { return policy.IsAllowed(window.ProcessName); }
@@ -152,7 +168,35 @@ internal sealed class FocusWorkspaceGuard : IFocusWorkspaceSession
     {
         if (Volatile.Read(ref disposed) != 0 || !GetAllowedWindows().Any(w => w.Handle == handle)) return false;
         if (!platform.Activate(handle)) return false;
-        lastAllowed = handle; return true;
+        lastAllowed = handle; focusSurfaceActive = false;
+        MaintainBackdropOrder();
+        return true;
+    }
+
+    public void SetBackdropWindows(IReadOnlyList<nint> handles)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        ArgumentNullException.ThrowIfNull(handles);
+        var snapshot = handles.Distinct().ToArray();
+        var windows = platform.GetWindows();
+        if (snapshot.Any(h => h == 0 || !windows.Any(w => w.Handle == h && w.ProcessId == platform.ProcessId && !w.IsDesktop)))
+            throw new ArgumentException("专注背景窗口尚未准备好。", nameof(handles));
+        backdrops = snapshot;
+        MaintainBackdropOrder();
+    }
+
+    private void MaintainBackdropOrder()
+    {
+        if (backdrops.Length == 0) return;
+        if (backdrops.Any(h => !platform.IsWindow(h)))
+            throw new InvalidOperationException("专注背景窗口已关闭，本轮白名单保护已停止。");
+        var windows = platform.GetWindows();
+        var permitted = windows.Where(w => !backdrops.Contains(w.Handle) && Allowed(w) &&
+            (!focusSurfaceActive ||
+             (w.ProcessId == platform.ProcessId && w.Handle != owner) ||
+             (!string.IsNullOrWhiteSpace(w.ProcessName) && FocusApplicationPolicy.IsSystemSafetyApp(w.ProcessName))))
+            .Select(w => w.Handle).ToArray();
+        platform.MaintainBackdropOrder(backdrops, permitted, windows);
     }
 
     public void Dispose()
