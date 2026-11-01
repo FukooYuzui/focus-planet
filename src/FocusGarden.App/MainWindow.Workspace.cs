@@ -125,6 +125,7 @@ public partial class MainWindow
             : [new WorkspaceBackdropWindow(currentTask, appearance.BackgroundImage, emergency, IsStrictFocusActive || DailyActive)];
         foreach (var backdrop in workspaceBackdrops)
         {
+            backdrop.UpdateBoard(boardSnapshot);
             backdrop.DisplayConfigurationChanged += (_, _) =>
             {
                 if (ReferenceEquals(workspaceSession, current))

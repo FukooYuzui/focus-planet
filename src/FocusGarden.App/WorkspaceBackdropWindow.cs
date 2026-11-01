@@ -34,6 +34,7 @@ internal sealed class WorkspaceBackdropWindow : Window
     private DailyTaskPanel? dailyTaskPanel;
     private TextBlock? dailyHeader;
     private bool watchingDisplays;
+    private readonly FocusSurfaceLayout boardLayout;
     internal event EventHandler? DisplayConfigurationChanged;
 
     internal WorkspaceBackdropWindow(string task, ImageSource? background, Action emergency, bool strict)
@@ -108,11 +109,12 @@ internal sealed class WorkspaceBackdropWindow : Window
             surface.Children.Add(new Image { Source = background, Stretch = Stretch.UniformToFill, IsHitTestVisible = false });
             surface.Children.Add(new Border { Background = FrozenBrush(Color.FromArgb(185, 5, 12, 20)), IsHitTestVisible = false });
         }
-        surface.Children.Add(new Viewbox
+        boardLayout = new FocusSurfaceLayout(new Viewbox
         {
             Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly,
             Child = content, Margin = new Thickness(24)
         });
+        surface.Children.Add(boardLayout);
         Content = surface;
         UpdateTime("00:00");
 
@@ -179,6 +181,7 @@ internal sealed class WorkspaceBackdropWindow : Window
         var text = "现在  " + DateTime.Now.ToString("yyyy年M月d日 dddd  HH:mm:ss", CultureInfo.GetCultureInfo("zh-CN"));
         if (currentTime.Text != text) currentTime.Text = text;
     }
+    internal void UpdateBoard(FocusGarden.Core.FocusBoardSnapshot snapshot) => boardLayout.Update(snapshot);
 
     internal void ConfigureDaily(Func<string, int, Task<string?>> start, Action stop)
     {

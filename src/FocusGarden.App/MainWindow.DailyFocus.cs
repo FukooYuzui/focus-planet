@@ -21,6 +21,7 @@ public partial class MainWindow
     private long dailyGeneration, dailyTimestamp;
     private DateTimeOffset? dailyTaskDeadline;
     private string dailyTaskTitle = "", dailyTaskNotice = "输入下一项任务和时长。";
+    private string dailyTaskKey = "";
     private FocusClock? dailyCreditClock;
     private SessionWriter? dailyWriter;
     private Task dailyStartTask = Task.CompletedTask, dailyWriteTask = Task.CompletedTask, dailyEndTask = Task.CompletedTask, dailyPlanTask = Task.CompletedTask;
@@ -118,6 +119,7 @@ public partial class MainWindow
         var window = dailyPlan.WindowAt(dailyNow());
         if (!dailyPlan.Enabled || window == null || window.Key == dailyPlan.SuppressedWindow || !dailyHotkeyRegistered) return;
         dailyStarting = true;
+        UpdateBoardUi();
         var generation = ++dailyGeneration;
         activeDailyPlan = dailyPlan.Snapshot(); activeDailyWindow = window;
         activeDailySlot = activeDailyPlan.SlotAt(dailyNow(), window);
@@ -125,6 +127,12 @@ public partial class MainWindow
         dailyEditor.SetActive(true);
         try
         {
+            await FlushFocusBoardAsync();
+            if (generation != dailyGeneration || desktopLocked || powerSuspended || dailyNow() >= window.End)
+            {
+                if (generation == dailyGeneration) StopDailyFocus("interrupted", "全天模式准备期间已中断，今天已暂停。", true);
+                return;
+            }
             if (!await PrepareWorkspaceAsync(DailyPolicy(), Volatile.Read(ref sessionEventGeneration)) ||
                 generation != dailyGeneration || desktopLocked || powerSuspended || dailyNow() >= window.End)
             {
@@ -143,7 +151,7 @@ public partial class MainWindow
             Status("全天专注已开启；Ctrl + Alt + Shift + F12 可强制退出，任务钟到点不会解除限制。");
         }
         catch (Exception ex) { if (generation == dailyGeneration) StopDailyFocus("interrupted", "全天模式未能开启：" + ex.Message, true); }
-        finally { dailyStarting = false; UpdateDailyUi(); }
+        finally { dailyStarting = false; UpdateDailyUi(); UpdateBoardUi(); }
     }
     private async Task<string?> StartDailyTaskAsync(string task, int minutes)
     {
@@ -166,6 +174,7 @@ public partial class MainWindow
                 dailyWriter = new SessionWriter(id); dailyCreditClock = new FocusClock(minutes * 60);
             }
             dailyTaskTitle = task; dailyTaskDeadline = dailyNow().AddMinutes(minutes);
+            dailyTaskKey = activeDailyPlan!.CountWholePeriod ? "task:" + Guid.NewGuid().ToString("N") : "session:" + dailyWriter!.Id;
             if (!activeDailyPlan!.CountWholePeriod) dailyTimestamp = Stopwatch.GetTimestamp();
             dailyTaskNotice = ""; UpdateDailyUi(); return null;
         }
@@ -209,12 +218,15 @@ public partial class MainWindow
         try { AdvanceDailyRecord(dailyNow()); }
         catch (Exception ex) { StopDailyFocus("interrupted", "任务保存失败，已解除限制：" + ex.Message, true); return; }
         dailyTaskDeadline = null; dailyTaskNotice = notice;
+        if (status == "completed") RecordBoardCompletion(new(dailyTaskKey, dailyTaskTitle, dailyNow()), dailyWriter);
         if (activeDailyPlan?.CountWholePeriod != true) EndDailyRecord(status);
         UpdateDailyUi();
     }
     private void EndDailyRecord(string status)
     {
-        var writer = dailyWriter; dailyWriter = null; dailyCreditClock = null;
+        var writer = dailyWriter;
+        if (status == "completed" && dailyCreditClock?.RemainingSeconds > 0) status = "interrupted";
+        dailyWriter = null; dailyCreditClock = null;
         if (writer == null) return;
         dailyEndTask = SaveDailyEndAsync(writer, status, dailyNow());
     }
@@ -235,6 +247,8 @@ public partial class MainWindow
             try { AdvanceDailyRecord(dailyNow()); }
             catch (Exception ex) { status = "interrupted"; message += " 末段记录未能保存：" + ex.Message; }
         var key = activeDailyWindow?.Key;
+        if (status == "completed" && dailyTaskDeadline is { } deadline && dailyNow() >= deadline)
+            RecordBoardCompletion(new(dailyTaskKey, dailyTaskTitle, deadline), dailyWriter);
         ++dailyGeneration;
         workspaceStartCancellation?.Cancel();
         activeDailyWindow = null;

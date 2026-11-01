@@ -519,6 +519,7 @@ internal static partial class Program
             });
             RunWorkspaceCases();
             RunDailyCases();
+            RunBoardCases();
         }
         finally { app.Shutdown(); }
         Console.WriteLine($"Strict focus: {passed} passed, {failed} failed; synthetic fixtures: {Root}");

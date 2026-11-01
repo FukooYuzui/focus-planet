@@ -4,6 +4,8 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../src/FocusGarden.Core/FocusGarden.Core.csproj"/>
+    <Compile Include="../../src/FocusGarden.App/FocusSurfaceLayout.cs" Link="FocusSurfaceLayout.cs"/>
     <Compile Include="../../src/FocusGarden.App/FocusAppearance.cs" Link="FocusAppearance.cs"/>
     <Compile Include="../../src/FocusGarden.App/ImmersionWindow.cs" Link="ImmersionWindow.cs"/>
   </ItemGroup>

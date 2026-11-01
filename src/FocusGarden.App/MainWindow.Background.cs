@@ -47,6 +47,7 @@ public partial class MainWindow
                 message = "记录写入曾失败，本轮按中断保存；已保存的专注时长保留。";
                 SessionLabel.Text = "下一次，继续从这里开始。";
             }
+            if (actualStatus == "completed") RecordBoardCompletion(new("session:" + id, currentTask, ended), writer);
         }
         catch (Exception error) { message += " 结束状态保存失败，下次启动会保留最后保存的时长并恢复为中断：" + error.Message; }
         finally
@@ -65,6 +66,8 @@ public partial class MainWindow
         await dailyWriteTask;
         await dailyEndTask;
         await dailyPlanTask;
+        await boardLoadTask;
+        await boardTask;
     }
 
     // Also used by isolated UI tests; it waits for actual background work rather than substituting synchronous behavior.
@@ -82,11 +85,13 @@ public partial class MainWindow
         if (allowClose) return;
         if (DailyActive || dailyStarting || dailyTaskStarting || dailyPlanSaving || clock != null || startingFocus || savingSettings) throw new InvalidOperationException("请先结束当前专注或等待开始操作完成。");
         shuttingDown = true; timer.Stop();
+        boardDebounce.Stop();
         ReleaseWorkspace();
         StartButton.IsEnabled = false; BreakButton.IsEnabled = false; TestButton.IsEnabled = false;
         SetupPanel.IsEnabled = false;
         try
         {
+            await FlushFocusBoardAsync();
             await DrainFocusAsync();
             await statisticsTask;
             await exportTask;

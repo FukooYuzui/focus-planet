@@ -411,6 +411,7 @@ Run("bounded background queue rejects excess work without dropping accepted writ
 });
 
 DailyPlanCases.Run(basePath, Run);
+FocusBoardCases.Run(basePath, Run);
 Console.WriteLine($"RESULT {passed} passed, {failed} failed");
 try { Directory.Delete(basePath, true); } catch { }
 return failed == 0 ? 0 : 1;

@@ -202,13 +202,20 @@ public sealed class FocusStore : IDisposable
     }
 
     public IReadOnlyList<FocusSession> GetSessions(int limit = 200)
+        => ReadSessions(limit, false);
+
+    public IReadOnlyList<FocusSession> GetCompletedSessions(int limit = 100)
+        => ReadSessions(limit, true);
+
+    private IReadOnlyList<FocusSession> ReadSessions(int limit, bool completedOnly)
     {
         if (limit is < 1 or > 100000) throw new ArgumentOutOfRangeException(nameof(limit));
         lock (_gate)
         {
             CheckDisposed();
             using var command = _connection.CreateCommand();
-            command.CommandText = "SELECT id,task,started_at,ended_at,planned_seconds,elapsed_seconds,status FROM sessions ORDER BY id DESC LIMIT $limit";
+            command.CommandText = "SELECT id,task,started_at,ended_at,planned_seconds,elapsed_seconds,status FROM sessions " +
+                (completedOnly ? "WHERE status='completed' " : "") + "ORDER BY id DESC LIMIT $limit";
             command.Parameters.AddWithValue("$limit", limit);
             using var reader = command.ExecuteReader();
             var result = new List<FocusSession>();

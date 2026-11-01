@@ -12,6 +12,7 @@ internal sealed class ImmersionWindow : Window
     private readonly TextBlock countdown = new() { Foreground = LightText, FontFamily = new FontFamily("Consolas"), FontSize = 150, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 10, 0, 16) };
     private readonly TextBlock currentTime = new() { Foreground = SecondaryText, FontSize = 18, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 16, 0, 24) };
     private bool allowClose;
+    private readonly FocusSurfaceLayout boardLayout;
     public ImmersionWindow(string task, bool hotkeyAvailable, ImageSource? background, Action emergency, bool strictFocus = false)
     {
         Style = (Style)FindResource(typeof(Window));
@@ -35,13 +36,15 @@ internal sealed class ImmersionWindow : Window
             surface.Children.Add(new Image { Source = background, Stretch = Stretch.UniformToFill, IsHitTestVisible = false });
             surface.Children.Add(new Border { Background = new SolidColorBrush(Color.FromArgb(174, 5, 12, 16)), IsHitTestVisible = false });
         }
-        surface.Children.Add(new Viewbox { Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly, Child = stack, Margin = new Thickness(24) });
+        boardLayout = new FocusSurfaceLayout(new Viewbox { Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly, Child = stack, Margin = new Thickness(12) });
+        surface.Children.Add(boardLayout);
         Content = surface;
         UpdateCurrentTime();
         Closing += (_, e) => { if (!allowClose) { e.Cancel = true; if (!strictFocus) Dispatcher.BeginInvoke(emergency); } };
         KeyDown += (_, e) => { if (e.Key == Key.Escape) { e.Handled = true; if (!strictFocus) emergency(); } };
     }
     public void UpdateTime(string time) { countdown.Text = time; UpdateCurrentTime(); }
+    internal void UpdateBoard(FocusGarden.Core.FocusBoardSnapshot snapshot) => boardLayout.Update(snapshot);
     private void UpdateCurrentTime() => currentTime.Text = "现在  " + DateTime.Now.ToString("yyyy年M月d日 dddd  HH:mm:ss", CultureInfo.GetCultureInfo("zh-CN"));
     public void Release() { allowClose = true; Close(); }
 }

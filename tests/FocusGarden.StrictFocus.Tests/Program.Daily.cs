@@ -137,8 +137,10 @@ internal static partial class Program
         Run("daily force exit during guard preparation cancels and disposes a late session without rearming", () =>
         {
             using var d = new DailyFixture(); var pending = new TaskCompletionSource<IFocusWorkspaceSession>(TaskCreationOptions.RunContinuationsAsynchronously);
-            SetWorkspaceFactory(d.F, (_, _, _) => pending.Task);
+            var preparing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            SetWorkspaceFactory(d.F, (_, _, _) => { preparing.SetResult(); return pending.Task; });
             var start = (Task)Invoke(d.F.Window, "StartDailyFocusAsync")!; Assert(d.Active);
+            Wait(preparing.Task);
             SendHotkey(d.F.Window, 9082);
             var guard = new FakeWorkspaceSession(); pending.SetResult(guard); Wait(start); d.F.Drain();
             Assert(!d.Active); Equal(1, guard.DisposeCalls); Assert(Field<IFocusWorkspaceSession?>(d.F.Window, "workspaceSession") == null); d.F.AssertHistory();

@@ -54,6 +54,7 @@ public partial class MainWindow : Window
         appearance = new FocusAppearance(App.DataDirectory);
         LoadSettingsUi();
         InitializeDailyFocus();
+        InitializeFocusBoard();
         ApplyAppearance(); UpdateWallClock();
         if (appearance.LoadWarning != null) Status(appearance.LoadWarning);
         if (App.TestMode) { TestButton.Visibility = Visibility.Visible; Title += " [独立验收模式]"; }
@@ -99,12 +100,13 @@ public partial class MainWindow : Window
     private void Page(string page)
     {
         DailyPage.Visibility = page == "daily" ? Visibility.Visible : Visibility.Collapsed;
+        FocusBoardPage.Visibility = page == "board" ? Visibility.Visible : Visibility.Collapsed;
         PlanetPage.Visibility = page == "planet" ? Visibility.Visible : Visibility.Collapsed;
         FocusPage.Visibility = page == "focus" ? Visibility.Visible : Visibility.Collapsed;
         StatsPage.Visibility = page == "stats" ? Visibility.Visible : Visibility.Collapsed;
         RulesPage.Visibility = page == "rules" ? Visibility.Visible : Visibility.Collapsed;
-        PageTitle.Text = page switch { "daily" => "给一整天，安排清晰的节奏。", "planet" => "把每一份投入，变成一个小世界。", "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
-        PageSubtitle.Text = page switch { "daily" => "每日时段管理应用，任务钟到时提醒但不解除限制。", "planet" => "六个月的陪伴，从一颗荒凉星球出发。", "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；严格专注期间不能在程序内提前解除。", _ => "选一件小事，开始一段完整的专注。" };
+        PageTitle.Text = page switch { "board" => "让长期目标，陪伴每一次专注。", "daily" => "给一整天，安排清晰的节奏。", "planet" => "把每一份投入，变成一个小世界。", "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
+        PageSubtitle.Text = page switch { "board" => "在这里编辑计划；进入专注后只查看，完成任务自动留下记录。", "daily" => "每日时段管理应用，任务钟到时提醒但不解除限制。", "planet" => "六个月的陪伴，从一颗荒凉星球出发。", "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；严格专注期间不能在程序内提前解除。", _ => "选一件小事，开始一段完整的专注。" };
         PageScroller.ScrollToTop();
         if (page is "focus" or "stats") RefreshStatistics();
         if (page == "focus" && dashboardReady) { RefreshUsageUi(); RefreshTokenUi(); }
@@ -182,9 +184,12 @@ public partial class MainWindow : Window
         if (DailyActive || dailyStarting || dailyTaskStarting || !dailyEndTask.IsCompleted || clock != null || startingFocus || endingFocus || savingSettings || shuttingDown || travellingPlanet || desktopLocked || powerSuspended) return;
         var generation = Volatile.Read(ref sessionEventGeneration);
         startingFocus = true;
+        UpdateBoardUi();
         SetupPanel.IsEnabled = false; WhitelistSettingsPanel.IsEnabled = false;
         try
         {
+            try { await FlushFocusBoardAsync(); }
+            catch (Exception ex) { Status("长期计划尚未保存，未开始专注：" + ex.Message); return; }
             if (!await SaveAllSettings()) return;
             if (StartWasInterrupted(generation)) return;
             plannedSeconds = shortTest ? 10 : settings.FocusMinutes * 60;
@@ -262,6 +267,7 @@ public partial class MainWindow : Window
     }
     private void SetActiveUi(bool active)
     {
+        UpdateBoardUi();
         StartButton.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
         BreakButton.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
         TestButton.Visibility = App.TestMode && !active ? Visibility.Visible : Visibility.Collapsed;
@@ -347,6 +353,7 @@ public partial class MainWindow : Window
     {
         if (clock == null || breaking || immersion != null || workspaceSession != null) return;
         immersion = new ImmersionWindow(currentTask, hotkeyRegistered, appearance.BackgroundImage, ConfirmEmergency, IsStrictFocusActive) { Owner = this };
+        immersion.UpdateBoard(boardSnapshot);
         immersion.UpdateTime(FormatTime(clock.RemainingSeconds)); immersion.Show();
     }
     private void EmergencyClick(object sender, RoutedEventArgs e) => ConfirmEmergency();
