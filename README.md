@@ -1,12 +1,28 @@
-# 专注星球 · Focus Planet 0.10.0
+# 专注星球 · Focus Planet 0.11.0
 
 一个从荒凉小星球开始、用专注与 Codex Token 助力养成的 Windows 桌面番茄钟。3D 卡通球面、宇宙星空、六个自然月养成周期，记录与家园布局只保存在本机。
 
 ## 下载使用
 
-**[下载专注星球 0.10.0 · Windows 64 位 EXE](https://github.com/FukooYuzui/focus-planet/releases/download/v0.10.0/FocusPlanet-v0.10.0-win-x64.exe)**
+**[下载专注星球 0.11.0 · Windows 64 位 EXE](https://github.com/FukooYuzui/focus-planet/releases/download/v0.11.0/FocusPlanet-v0.11.0-win-x64.exe)**
 
-下载后双击运行，无需另装 .NET。更新前请正常关闭旧版；新版沿用原有本机存档，并在首次升级时自动备份。发布说明、文件校验值和第三方许可见 [GitHub Release](https://github.com/FukooYuzui/focus-planet/releases/tag/v0.10.0)。
+下载后双击运行，无需另装 .NET。更新前请正常关闭旧版；新版沿用原有本机存档，并在首次升级时自动备份。发布说明、文件校验值和第三方许可见 [GitHub Release](https://github.com/FukooYuzui/focus-planet/releases/tag/v0.11.0)。
+
+## 0.11.0 Codex 工作日记
+
+新增“工作日记”页，在专注模式外按日期查看、编辑并保存 Markdown，支持标题、粗体、列表、引用和代码块的轻量离线预览。链接、HTML 和远程图片不会自动打开。正文保存为 `%LOCALAPPDATA%\FocusGarden\diaries\yyyy-MM-dd.md`，可用其他 Markdown 编辑器打开。
+
+首次展开“自动整理与 Codex 设置”，勾选“次日首次启动时，自动整理前一天”并保存；公众下载包默认关闭自动发送。开启后每次启动只检查前一天，已有正文就跳过。不会在关闭软件时后台运行，不自动追补更早的缺失日期；可以手动选择日期生成。专注中不能编辑日记。
+
+来源包括按本地日期实际保存的专注秒数、最近完成列表中当天的任务与进度说明，以及可选的当天 Codex 用户/助手对话节选。当前长期目标状态会单独标明，不能冒充当天新增进度。对话只读取所选 Codex 目录的 sessions 与 archived_sessions，不读取工具结果、系统提示或认证文件。有限扫描：最近修改的最多 200 个文件、单文件末尾 4 MB、总计约 64 MB、对话总计 6 万字符；截断和读取异常会向摘要说明。因此不等于全部电脑活动、全部历史对话或账单。
+
+点击“用 Codex 生成日记”调用官方 `codex exec`，使用本机 Codex CLI 已保存登录，消耗其相应额度；API Key 登录则按 API 用量计费。本软件不提取/储存凭据，不把登录内容打包上传。需要较新 CLI 支持 `--ignore-user-config` 和 `--ephemeral`；自动检测原生 EXE，或在设置中选择 codex.exe。不会接管当前对话。独立只读整理会话关闭命令执行、应用连接与网页搜索，忽略用户自定义 Codex 配置，因此自定义服务商和 MCP 不会用于日记。生成时所选记录会发送给 Codex；基础密钥遮盖不保证识别所有隐私，可关闭对话来源。
+
+生成不覆盖已有正文：已有文件时另存 drafts 中，并提供“查看新草稿”；确认内容后点击保存才替换正文，旧文保存在 backups 中。外部编辑冲突拒绝覆盖，必要时复制文字后“重新读取”。退出软件会保存未保存的编辑，保存失败保留窗口。取消、断网、登录失效或超时不会写入半篇日记，可重试或先创建本地草稿。自动整理失败可手动重试，或下次启动重试前一天。
+
+所有工作记录提取与 Codex 调用在后台进行，每次最多一个整理任务，三分钟超时；没有新增每秒读盘、常驻浏览器或新的本地模型。日记独立存储，不改变专注、星球和布局数据库。旧专注秒数与每日分配继续保留。
+
+官方依据：[非交互式 Codex](https://developers.openai.com/codex/noninteractive)、[登录方式](https://developers.openai.com/codex/auth)、[配置参考](https://developers.openai.com/codex/config-reference)。
 
 ## 0.10.0 长期任务分部分与百分比
 
@@ -125,7 +141,7 @@
 3. 新星球从零开始。旧专注记录和旧 Token 日历保留，不会在首次启动时直接变成成长。
 4. 在“布置我的家园”的分类条目中选择已解锁内容，查看提示，点击“选择内容并放置”，再点击空地块；选中已有内容后可以移动、旋转 90° 或收起。每次操作自动保存。
 
-如旧版还在运行，请先正常关闭。窗口标题和左下角应显示 0.10.0。本版继续使用 `%LOCALAPPDATA%\FocusGarden`，兼容以前的专注记录、背景和设置。移动或替换 EXE 不会搬走或清空数据；首次运行库提取所用的临时缓存与专注记录目录分开。工程内部仍保留兼容用的 FocusGarden 名称。
+如旧版还在运行，请先正常关闭。窗口标题和左下角应显示 0.11.0。本版继续使用 `%LOCALAPPDATA%\FocusGarden`，兼容以前的专注记录、背景和设置。移动或替换 EXE 不会搬走或清空数据；首次运行库提取所用的临时缓存与专注记录目录分开。工程内部仍保留兼容用的 FocusGarden 名称。
 
 ## 星球如何成长
 

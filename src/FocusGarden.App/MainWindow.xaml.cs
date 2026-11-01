@@ -72,6 +72,7 @@ public partial class MainWindow : Window
         Closing += ClosingWindow;
         Closed += (_, _) => { shuttingDown = true; timer.Stop(); ReleaseWorkspace(); SystemEvents.PowerModeChanged -= PowerChanged; SystemEvents.SessionSwitch -= SessionChanged; if (hotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9081); if (dailyHotkeyRegistered && hwndSource != null) NativeFocus.UnregisterHotKey(hwndSource.Handle, 9082); bridge.Dispose(); };
         InitializeDashboard();
+        InitializeDiary();
         InitializePlanet();
         RefreshStatistics();
         StateChanged += (_, _) => { if (WindowState != WindowState.Minimized) RefreshStatistics(); };
@@ -99,6 +100,7 @@ public partial class MainWindow : Window
     }
     private void Page(string page)
     {
+        DiaryPage.Visibility = page == "diary" ? Visibility.Visible : Visibility.Collapsed;
         DailyPage.Visibility = page == "daily" ? Visibility.Visible : Visibility.Collapsed;
         FocusBoardPage.Visibility = page == "board" ? Visibility.Visible : Visibility.Collapsed;
         PlanetPage.Visibility = page == "planet" ? Visibility.Visible : Visibility.Collapsed;
@@ -108,6 +110,7 @@ public partial class MainWindow : Window
         PageTitle.Text = page switch { "board" => "让长期目标，陪伴每一次专注。", "daily" => "给一整天，安排清晰的节奏。", "planet" => "把每一份投入，变成一个小世界。", "stats" => "每一份专注，都有迹可循。", "rules" => "把干扰，暂时放在门外。", _ => "把这一刻，留给重要的事。" };
         PageSubtitle.Text = page switch { "board" => "在这里编辑计划；进入专注后只查看，完成任务自动留下记录。", "daily" => "每日时段管理应用，任务钟到时提醒但不解除限制。", "planet" => "六个月的陪伴，从一颗荒凉星球出发。", "stats" => "积累看得见，也记得那些未完成的努力。", "rules" => "只在专注期间生效；严格专注期间不能在程序内提前解除。", _ => "选一件小事，开始一段完整的专注。" };
         PageScroller.ScrollToTop();
+        if (page == "diary") { PageTitle.Text = "把每天的工作，留成可以回看的日记。"; PageSubtitle.Text = "Codex 整理，Markdown 保存；你的修改由你决定。"; }
         if (page is "focus" or "stats") RefreshStatistics();
         if (page == "focus" && dashboardReady) { RefreshUsageUi(); RefreshTokenUi(); }
     }

@@ -207,6 +207,20 @@ public sealed class FocusStore : IDisposable
     public IReadOnlyList<FocusSession> GetCompletedSessions(int limit = 100)
         => ReadSessions(limit, true);
 
+    public IReadOnlyList<DiaryFocusRow> GetDiaryFocus(DateOnly day)
+    {
+        lock (_gate)
+        {
+            CheckDisposed();
+            using var command = _connection.CreateCommand();
+            command.CommandText = "SELECT s.task,d.seconds,s.status FROM session_days d JOIN sessions s ON s.id=d.session_id WHERE d.day=$day ORDER BY s.id";
+            command.Parameters.AddWithValue("$day", day.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+            using var reader = command.ExecuteReader(); var result = new List<DiaryFocusRow>();
+            while (reader.Read()) result.Add(new(reader.GetString(0), reader.GetInt32(1), reader.GetString(2)));
+            return result;
+        }
+    }
+
     private IReadOnlyList<FocusSession> ReadSessions(int limit, bool completedOnly)
     {
         if (limit is < 1 or > 100000) throw new ArgumentOutOfRangeException(nameof(limit));

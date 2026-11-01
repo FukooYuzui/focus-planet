@@ -115,6 +115,7 @@ public partial class MainWindow
     }
     private void UpdateBoardUi()
     {
+        UpdateDiaryUi();
         boardPlansInput.IsReadOnly = !CanEditBoard;
         if (goalEditor != null) { goalEditor.IsEnabled = CanEditBoard; goalEditor.UpdateGoals(boardSnapshot.Goals); }
         normalGoalPicker.IsEnabled = CanEditBoard;

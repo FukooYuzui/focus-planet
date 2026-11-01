@@ -12,12 +12,14 @@ public partial class App : Application
     public static string CurrentVersion => typeof(App).Assembly.GetName().Version!.ToString(3);
     public static string DataDirectory { get; private set; } = "";
     public static bool TestMode { get; private set; }
+    public static bool InstallationCheck { get; private set; }
     protected override async void OnStartup(StartupEventArgs e)
     {
         // The shell recovery helper never opens user data or participates in the main app singleton.
         if (await FocusShellWatchdog.TryRunAsync(e.Args) is int recoveryExit) { Shutdown(recoveryExit); return; }
         base.OnStartup(e);
         bool checkInstallation = e.Args.Contains("--check-installation");
+        InstallationCheck = checkInstallation;
         TestMode = e.Args.Contains("--test-mode");
         var idx = Array.IndexOf(e.Args, "--data-dir");
         if ((checkInstallation || TestMode) && (idx < 0 || idx + 1 >= e.Args.Length)) { Shutdown(2); return; }

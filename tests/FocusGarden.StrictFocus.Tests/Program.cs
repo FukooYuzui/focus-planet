@@ -31,6 +31,12 @@ internal static partial class Program
         var app = new TestApplication { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         // Match Application.Run's UI continuation context while keeping every window hidden.
         SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
+        if (args.Length == 2 && args[0] == "--diary-render")
+        {
+            renderDirectory = Path.GetFullPath(args[1]);
+            try { RunDiaryCases(); } finally { app.Shutdown(); }
+            return failed == 0 ? 0 : 1;
+        }
         if (args.Length == 2 && args[0] == "--goals-render")
         {
             renderDirectory = Path.GetFullPath(args[1]);
@@ -527,6 +533,7 @@ internal static partial class Program
             RunDailyCases();
             RunBoardCases();
             RunGoalCases();
+            RunDiaryCases();
         }
         finally { app.Shutdown(); }
         Console.WriteLine($"Strict focus: {passed} passed, {failed} failed; synthetic fixtures: {Root}");

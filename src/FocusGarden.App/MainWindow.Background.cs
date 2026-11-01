@@ -74,6 +74,7 @@ public partial class MainWindow
     // Also used by isolated UI tests; it waits for actual background work rather than substituting synchronous behavior.
     internal async Task WaitForBackgroundAsync()
     {
+        await diaryLoadTask;
         await DrainFocusAsync();
         await statisticsTask;
         await DrainDashboardAsync();
@@ -93,6 +94,7 @@ public partial class MainWindow
         try
         {
             await FlushFocusBoardAsync();
+            await CloseDiaryAsync();
             await DrainFocusAsync();
             await statisticsTask;
             await exportTask;
