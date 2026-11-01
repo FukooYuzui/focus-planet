@@ -181,9 +181,10 @@ internal sealed class WorkspaceBackdropWindow : Window
         var text = "现在  " + DateTime.Now.ToString("yyyy年M月d日 dddd  HH:mm:ss", CultureInfo.GetCultureInfo("zh-CN"));
         if (currentTime.Text != text) currentTime.Text = text;
     }
-    internal void UpdateBoard(FocusGarden.Core.FocusBoardSnapshot snapshot) => boardLayout.Update(snapshot);
+    internal void UpdateBoard(FocusGarden.Core.FocusBoardSnapshot snapshot)
+    { boardLayout.Update(snapshot); dailyTaskPanel?.GoalPicker.UpdateGoals(snapshot.Goals); }
 
-    internal void ConfigureDaily(Func<string, int, Task<string?>> start, Action stop)
+    internal void ConfigureDaily(Func<string, int, FocusGarden.Core.GoalContribution?, Task<string?>> start, Action stop)
     {
         countdown.FontSize = 70;
         dailyHeader = new TextBlock { Foreground = LightText, FontSize = 16, TextAlignment = TextAlignment.Center, Margin = new Thickness(0, 10, 0, 12) };

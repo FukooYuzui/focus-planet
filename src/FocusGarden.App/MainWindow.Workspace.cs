@@ -132,7 +132,7 @@ public partial class MainWindow
                     Finish("interrupted", "显示器配置发生变化，本轮已中断并恢复桌面；已保存的时长保留。");
             };
             if (DailyActive)
-                backdrop.ConfigureDaily((task, minutes) => ReferenceEquals(workspaceSession, current) ? StartDailyTaskAsync(task, minutes) : Task.FromResult<string?>("这轮已结束。"),
+                backdrop.ConfigureDaily((task, minutes, contribution) => ReferenceEquals(workspaceSession, current) ? StartDailySelectedTaskAsync(task, minutes, contribution) : Task.FromResult<string?>("这轮已结束。"),
                     () => { if (ReferenceEquals(workspaceSession, current)) StopDailyTask("emergency", "任务钟已停止，全天专注继续。"); });
             backdrop.UpdateTime(WorkspaceCountdown);
             if (workspaceWindowsShown) backdrop.Show();

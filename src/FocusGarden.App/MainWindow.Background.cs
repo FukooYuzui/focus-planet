@@ -14,6 +14,7 @@ public partial class MainWindow
     private sealed class SessionWriter(long id)
     {
         public long Id { get; } = id;
+        public GoalContribution? Contribution { get; init; }
         public volatile bool Failed;
     }
 

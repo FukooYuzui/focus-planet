@@ -31,6 +31,12 @@ internal static partial class Program
         var app = new TestApplication { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         // Match Application.Run's UI continuation context while keeping every window hidden.
         SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
+        if (args.Length == 2 && args[0] == "--goals-render")
+        {
+            renderDirectory = Path.GetFullPath(args[1]);
+            try { RunGoalCases(); } finally { app.Shutdown(); }
+            return failed == 0 ? 0 : 1;
+        }
         if (args.Length == 2 && args[0] == "--soak")
         {
             if (!int.TryParse(args[1], out var minutes) || minutes is < 1 or > 60) throw new ArgumentException("Soak duration must be 1-60 minutes.");
@@ -520,6 +526,7 @@ internal static partial class Program
             RunWorkspaceCases();
             RunDailyCases();
             RunBoardCases();
+            RunGoalCases();
         }
         finally { app.Shutdown(); }
         Console.WriteLine($"Strict focus: {passed} passed, {failed} failed; synthetic fixtures: {Root}");

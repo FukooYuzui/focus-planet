@@ -13,6 +13,8 @@ public partial class MainWindow
     private readonly TextBox boardPlansInput = new() { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, MinHeight = 180, MaxHeight = 330, MaxLength = FocusBoardStore.MaximumPlansLength };
     private readonly TextBlock boardStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 10, 0, 16) };
     private readonly StackPanel boardCompleted = new();
+    private LongGoalEditor goalEditor = null!;
+    private readonly GoalWorkPicker normalGoalPicker = new();
     private readonly DispatcherTimer boardDebounce = new() { Interval = TimeSpan.FromMilliseconds(700) };
     private Task boardLoadTask = Task.CompletedTask, boardTask = Task.CompletedTask;
     private bool boardReady, boardPlansDirty, boardLoadingText;
@@ -21,8 +23,10 @@ public partial class MainWindow
     private void InitializeFocusBoard()
     {
         var page = new StackPanel();
-        page.Children.Add(new TextBlock { Text = "长期计划", FontSize = 23, FontWeight = FontWeights.SemiBold });
-        page.Children.Add(new TextBlock { Text = "每行一项，停笔后自动保存。专注时左上角只显示计划，结束专注后才能编辑。", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 10, 0, 16) });
+        goalEditor = new LongGoalEditor(SaveGoalAsync, ArchiveGoalAsync);
+        page.Children.Add(goalEditor); GoalPickerHost.Content = normalGoalPicker;
+        page.Children.Add(new TextBlock { Text = "补充备忘", FontSize = 20, FontWeight = FontWeights.SemiBold });
+        page.Children.Add(new TextBlock { Text = "可选，每行一项，停笔后自动保存。任务设置与备忘均只能在专注外修改。", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 10, 0, 16) });
         page.Children.Add(boardPlansInput); page.Children.Add(boardStatus);
         page.Children.Add(new TextBlock { Text = "最近完成", FontSize = 20, FontWeight = FontWeights.SemiBold });
         page.Children.Add(new TextBlock { Text = "自动保留最近 100 项。提前退出、休息不会加入；历史专注统计不受此列表容量影响。", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 16) });
@@ -72,12 +76,12 @@ public partial class MainWindow
         try { boardSnapshot = await work; boardStatus.Text = "已保存到本机 · 专注时仅供查看"; UpdateBoardUi(); return true; }
         catch (Exception ex) { boardStatus.Text = "清单尚未保存，可稍后重试；已保存的专注时长不受影响：" + ex.Message; return false; }
     }
-    private void RecordBoardCompletion(CompletedFocusTask completion, SessionWriter? writer = null)
+    private void RecordBoardCompletion(CompletedFocusTask completion, SessionWriter? writer = null, GoalContribution? contribution = null)
     {
         if (!boardReady) return;
         boardTask = ObserveBoardWriteAsync(focusWork.RunAsync(() =>
         {
-            if (writer?.Failed != true) boardStore!.AddCompleted(completion);
+            if (writer?.Failed != true) boardStore!.AddCompleted(completion, contribution ?? writer?.Contribution);
             boardStore!.Flush(); return boardStore.Snapshot();
         }));
     }
@@ -93,9 +97,29 @@ public partial class MainWindow
         }
     }
     private void ShowFocusBoard(object sender, RoutedEventArgs e) { Page("board"); UpdateBoardUi(); }
+    private async Task<LongTermGoal> SaveGoalAsync(GoalDraft draft)
+    {
+        if (!CanEditBoard) throw new InvalidOperationException("请在专注结束后设置长期任务。");
+        LongTermGoal? result = null;
+        var task = ObserveBoardWriteAsync(focusWork.RunAsync(() => { result = boardStore!.SaveGoalPersisted(draft); return boardStore.Snapshot(); }));
+        boardTask = task;
+        if (!await task) throw new IOException(boardStatus.Text);
+        return result!;
+    }
+    private async Task ArchiveGoalAsync(string id)
+    {
+        if (!CanEditBoard) throw new InvalidOperationException("请在专注结束后归档任务。");
+        var task = ObserveBoardWriteAsync(focusWork.RunAsync(() => { boardStore!.ArchiveGoalPersisted(id); return boardStore.Snapshot(); }));
+        boardTask = task;
+        if (!await task) throw new IOException(boardStatus.Text);
+    }
     private void UpdateBoardUi()
     {
         boardPlansInput.IsReadOnly = !CanEditBoard;
+        if (goalEditor != null) { goalEditor.IsEnabled = CanEditBoard; goalEditor.UpdateGoals(boardSnapshot.Goals); }
+        normalGoalPicker.IsEnabled = CanEditBoard;
+        normalGoalPicker.UpdateGoals(boardSnapshot.Goals);
+        dailyTaskPanel?.GoalPicker.UpdateGoals(boardSnapshot.Goals);
         immersion?.UpdateBoard(boardSnapshot);
         foreach (var backdrop in workspaceBackdrops) backdrop.UpdateBoard(boardSnapshot);
         // This method is called on edits/completions and mode transitions, never on timer ticks.

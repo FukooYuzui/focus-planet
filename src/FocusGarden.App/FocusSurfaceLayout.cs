@@ -36,10 +36,9 @@ internal sealed class FocusSurfaceLayout : Grid
     }
     internal void Update(FocusBoardSnapshot snapshot)
     {
-        if (rendered != null && rendered.Plans == snapshot.Plans && rendered.Completed.SequenceEqual(snapshot.Completed)) return;
+        if (rendered != null && rendered.DisplayPlans == snapshot.DisplayPlans && rendered.Completed.SequenceEqual(snapshot.Completed)) return;
         rendered = snapshot;
-        plans.Text = string.IsNullOrWhiteSpace(snapshot.Plans) ? "暂无长期计划\n可在专注外的“计划清单”页填写。" :
-            string.Join("\n\n", snapshot.Plans.Split('\n').Select(x => x.Trim()).Where(x => x.Length > 0).Select(x => "• " + x));
+        plans.Text = string.IsNullOrWhiteSpace(snapshot.DisplayPlans) ? "暂无长期计划\n可在专注外的“计划清单”页填写。" : snapshot.DisplayPlans;
         completed.Children.Clear();
         if (snapshot.Completed.Count == 0) completed.Children.Add(new TextBlock { Text = "完成番茄钟或任务钟后，\n会自动显示在这里。", FontSize = 12, TextWrapping = TextWrapping.Wrap });
         foreach (var task in snapshot.Completed)

@@ -22,6 +22,7 @@ public partial class MainWindow
     private DateTimeOffset? dailyTaskDeadline;
     private string dailyTaskTitle = "", dailyTaskNotice = "输入下一项任务和时长。";
     private string dailyTaskKey = "";
+    private GoalContribution? dailyGoalContribution;
     private FocusClock? dailyCreditClock;
     private SessionWriter? dailyWriter;
     private Task dailyStartTask = Task.CompletedTask, dailyWriteTask = Task.CompletedTask, dailyEndTask = Task.CompletedTask, dailyPlanTask = Task.CompletedTask;
@@ -35,7 +36,7 @@ public partial class MainWindow
         try { dailyPlan = dailyPlanStore.Load(); } catch (Exception ex) { error = "全天计划未加载，未开启限制；原文件已保留：" + ex.Message; }
         dailyEditor = new DailyFocusEditor(SaveDailyPlanAsync, ResumeDailyPlanAsync);
         dailyEditor.Load(dailyPlan);
-        dailyTaskPanel = new DailyTaskPanel(StartDailyTaskAsync, () => StopDailyTask("emergency", "任务钟已停止，全天专注继续。"));
+        dailyTaskPanel = new DailyTaskPanel(StartDailySelectedTaskAsync, () => StopDailyTask("emergency", "任务钟已停止，全天专注继续。"));
         dailyEditor.Children.Add(dailyTaskPanel);
         DailyFocusHost.Content = dailyEditor;
         if (error != null) dailyEditor.StatusText.Text = error;
@@ -153,11 +154,13 @@ public partial class MainWindow
         catch (Exception ex) { if (generation == dailyGeneration) StopDailyFocus("interrupted", "全天模式未能开启：" + ex.Message, true); }
         finally { dailyStarting = false; UpdateDailyUi(); UpdateBoardUi(); }
     }
-    private async Task<string?> StartDailyTaskAsync(string task, int minutes)
+    private Task<string?> StartDailyTaskAsync(string task, int minutes) => StartDailySelectedTaskAsync(task, minutes, null);
+    private async Task<string?> StartDailySelectedTaskAsync(string task, int minutes, GoalContribution? contribution)
     {
         if (!DailyActive || dailyStarting || dailyTaskStarting || !dailyEndTask.IsCompleted) return "请等待全天模式准备和上一项记录保存完成。";
         if (dailyTaskDeadline != null) return "已有任务钟正在运行，请先停止它。";
         task = task.Trim();
+        if (task.Length == 0 && contribution != null) task = boardSnapshot.Goals.FirstOrDefault(x => x.Id == contribution.GoalId)?.Title ?? "";
         if (task.Length is < 1 or > 200) return "请填写 1–200 个字的任务。";
         if (minutes is < 1 or > 720) return "时长请输入 1–720 分钟。";
         if (dailyNow().AddMinutes(minutes) > activeDailyWindow!.End) return "任务时长不能超过今日全天模式的结束时间。";
@@ -165,6 +168,14 @@ public partial class MainWindow
         var generation = dailyGeneration;
         try
         {
+            await boardTask;
+            if (contribution != null)
+            {
+                contribution = contribution with { PartIds = contribution.PartIds.ToArray() };
+                try { await focusWork.RunAsync(() => boardStore!.ValidateContribution(contribution)); }
+                catch (Exception ex) { return ex.Message; }
+            }
+            if (generation != dailyGeneration || !DailyActive) return "这轮全天专注已结束。";
             if (!activeDailyPlan!.CountWholePeriod)
             {
                 var started = dailyNow();
@@ -174,6 +185,7 @@ public partial class MainWindow
                 dailyWriter = new SessionWriter(id); dailyCreditClock = new FocusClock(minutes * 60);
             }
             dailyTaskTitle = task; dailyTaskDeadline = dailyNow().AddMinutes(minutes);
+            dailyGoalContribution = contribution;
             dailyTaskKey = activeDailyPlan!.CountWholePeriod ? "task:" + Guid.NewGuid().ToString("N") : "session:" + dailyWriter!.Id;
             if (!activeDailyPlan!.CountWholePeriod) dailyTimestamp = Stopwatch.GetTimestamp();
             dailyTaskNotice = ""; UpdateDailyUi(); return null;
@@ -218,7 +230,8 @@ public partial class MainWindow
         try { AdvanceDailyRecord(dailyNow()); }
         catch (Exception ex) { StopDailyFocus("interrupted", "任务保存失败，已解除限制：" + ex.Message, true); return; }
         dailyTaskDeadline = null; dailyTaskNotice = notice;
-        if (status == "completed") RecordBoardCompletion(new(dailyTaskKey, dailyTaskTitle, dailyNow()), dailyWriter);
+        if (status == "completed") RecordBoardCompletion(new(dailyTaskKey, dailyTaskTitle, dailyNow()), dailyWriter, dailyGoalContribution);
+        dailyGoalContribution = null;
         if (activeDailyPlan?.CountWholePeriod != true) EndDailyRecord(status);
         UpdateDailyUi();
     }
@@ -248,7 +261,8 @@ public partial class MainWindow
             catch (Exception ex) { status = "interrupted"; message += " 末段记录未能保存：" + ex.Message; }
         var key = activeDailyWindow?.Key;
         if (status == "completed" && dailyTaskDeadline is { } deadline && dailyNow() >= deadline)
-            RecordBoardCompletion(new(dailyTaskKey, dailyTaskTitle, deadline), dailyWriter);
+            RecordBoardCompletion(new(dailyTaskKey, dailyTaskTitle, deadline), dailyWriter, dailyGoalContribution);
+        dailyGoalContribution = null;
         ++dailyGeneration;
         workspaceStartCancellation?.Cancel();
         activeDailyWindow = null;

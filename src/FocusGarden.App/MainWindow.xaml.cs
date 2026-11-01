@@ -192,6 +192,13 @@ public partial class MainWindow : Window
             catch (Exception ex) { Status("长期计划尚未保存，未开始专注：" + ex.Message); return; }
             if (!await SaveAllSettings()) return;
             if (StartWasInterrupted(generation)) return;
+            GoalContribution? contribution;
+            try
+            {
+                contribution = normalGoalPicker.Capture();
+                if (contribution != null) await focusWork.RunAsync(() => boardStore!.ValidateContribution(contribution));
+            }
+            catch (Exception ex) { Status(ex.Message); return; }
             plannedSeconds = shortTest ? 10 : settings.FocusMinutes * 60;
             var applicationPolicy = FocusApplicationPolicy.Create(settings);
             // Capture the choice once: a session cannot unlock itself through later settings changes.
@@ -202,7 +209,7 @@ public partial class MainWindow : Window
                 return;
             }
             if (StartWasInterrupted(generation)) return;
-            currentTask = string.IsNullOrWhiteSpace(TaskInput.Text) ? "一段专注时间" : TaskInput.Text.Trim();
+            currentTask = string.IsNullOrWhiteSpace(TaskInput.Text) ? normalGoalPicker.SelectedTitle ?? "一段专注时间" : TaskInput.Text.Trim();
             try
             {
                 var task = currentTask; var duration = plannedSeconds; var started = DateTimeOffset.Now;
@@ -212,7 +219,7 @@ public partial class MainWindow : Window
                     var id = store.BeginSession(task, duration, started);
                     Interlocked.Increment(ref focusDataRevision); return id;
                 });
-                sessionWriter = new SessionWriter(sessionId.Value);
+                sessionWriter = new SessionWriter(sessionId.Value) { Contribution = contribution };
             }
             catch (Exception ex) { Status("无法保存记录，未开启限制：" + ex.Message); return; }
             if (StartWasInterrupted(generation))
